@@ -41,5 +41,13 @@ export default defineConfig({
   },
   build: {
     outDir: 'build',
+    minify: 'terser',
+    terserOptions: {
+      compress: {
+        // Remove all console statements in production
+        drop_console: true,
+        drop_debugger: true,
+      },
+    },
   },
 })
