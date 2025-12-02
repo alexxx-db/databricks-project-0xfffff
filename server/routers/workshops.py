@@ -4,7 +4,7 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
 from server.database import WorkshopDB, get_db
@@ -1540,6 +1540,96 @@ async def get_mlflow_traces(workshop_id: str, config: MLflowIntakeConfigCreate, 
     return mlflow_service.search_traces(mlflow_config)
   except Exception as e:
     raise HTTPException(status_code=500, detail=f'Failed to get MLflow traces: {str(e)}')
+
+
+@router.post('/{workshop_id}/csv-upload')
+async def upload_csv_traces(workshop_id: str, file: UploadFile = File(...), db: Session = Depends(get_db)) -> Dict[str, Any]:
+  """Upload traces from a CSV file.
+
+  Expected CSV format:
+  - Required columns: input, output
+  - Optional columns: context (JSON string)
+
+  Example CSV:
+  input,output
+  "What is Python?","Python is a programming language"
+  "Explain AI","AI stands for Artificial Intelligence"
+  """
+  db_service = DatabaseService(db)
+  workshop = db_service.get_workshop(workshop_id)
+  if not workshop:
+    raise HTTPException(status_code=404, detail='Workshop not found')
+
+  # Validate file type
+  if not file.filename.endswith('.csv'):
+    raise HTTPException(status_code=400, detail='File must be a CSV file')
+
+  try:
+    import csv
+    import io
+    import json
+
+    # Read file content
+    content = await file.read()
+    decoded_content = content.decode('utf-8')
+
+    # Parse CSV
+    csv_reader = csv.DictReader(io.StringIO(decoded_content))
+
+    # Validate required columns
+    if not csv_reader.fieldnames or 'input' not in csv_reader.fieldnames or 'output' not in csv_reader.fieldnames:
+      raise HTTPException(
+        status_code=400,
+        detail='CSV must contain "input" and "output" columns. Found columns: ' + ', '.join(csv_reader.fieldnames or [])
+      )
+
+    # Convert CSV rows to TraceUpload objects
+    trace_uploads = []
+    row_number = 1
+    for row in csv_reader:
+      row_number += 1
+
+      # Skip empty rows
+      if not row.get('input') or not row.get('output'):
+        continue
+
+      # Parse context if provided
+      context = None
+      if 'context' in row and row['context']:
+        try:
+          context = json.loads(row['context'])
+        except json.JSONDecodeError:
+          logger.warning(f'Row {row_number}: Invalid JSON in context column, skipping context')
+
+      trace_upload = TraceUpload(
+        input=row['input'].strip(),
+        output=row['output'].strip(),
+        context=context,
+        trace_metadata={'source': 'csv_upload', 'filename': file.filename}
+      )
+      trace_uploads.append(trace_upload)
+
+    if not trace_uploads:
+      raise HTTPException(status_code=400, detail='No valid traces found in CSV file')
+
+    # Add traces to workshop
+    added_traces = db_service.add_traces(workshop_id, trace_uploads)
+
+    # Update intake status (similar to MLflow ingestion)
+    db_service.update_mlflow_ingestion_status(workshop_id, len(added_traces))
+
+    return {
+      'message': f'Successfully uploaded {len(added_traces)} traces from CSV',
+      'trace_count': len(added_traces),
+      'workshop_id': workshop_id,
+      'filename': file.filename
+    }
+
+  except HTTPException:
+    raise
+  except Exception as e:
+    logger.error(f'Failed to process CSV file: {str(e)}')
+    raise HTTPException(status_code=500, detail=f'Failed to process CSV file: {str(e)}')
 
 
 # User Discovery Completion endpoints
