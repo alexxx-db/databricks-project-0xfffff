@@ -23,35 +23,51 @@ test('login redirection works immediately without reload', async ({ page }) => {
     annotation_started: false
   };
 
-  const isApiCall = (route: any) => {
-    const type = route.request().resourceType();
-    return type === 'fetch' || type === 'xhr';
-  };
-
   // MOCK ENDPOINTS
+  
+  // 1. Login Mock
   await page.route('**/users/auth/login', async route => {
-    if (!isApiCall(route)) return route.fallback();
-    await route.fulfill({ json: { user: TEST_USER } });
+    if (route.request().resourceType() === 'fetch') {
+      await route.fulfill({ json: { user: TEST_USER } });
+    } else {
+      await route.fallback();
+    }
   });
 
+  // 2. User Validation Mock
   await page.route((url) => url.toString().includes(`/users/${TEST_USER.id}`), async route => {
-    if (!isApiCall(route)) return route.fallback();
-    await route.fulfill({ json: TEST_USER });
+    if (route.request().resourceType() === 'fetch') {
+      await route.fulfill({ json: TEST_USER });
+    } else {
+      await route.fallback();
+    }
   });
 
-  await page.route((url) => url.toString().includes('/permissions'), async route => {
-    if (!isApiCall(route)) return route.fallback();
-    await route.fulfill({ json: { can_view_discovery: true, can_annotate: true }});
+  // 3. User Permissions Mock
+  await page.route('**/permissions', async route => {
+    if (route.request().resourceType() === 'fetch') {
+      await route.fulfill({ json: { can_view_discovery: true, can_annotate: true } });
+    } else {
+      await route.fallback();
+    }
   });
 
+  // 4. Workshop Data Mock
   await page.route((url) => url.toString().includes(`/workshops/${TEST_WORKSHOP.id}`), async route => {
-    if (!isApiCall(route)) return route.fallback();
-    await route.fulfill({ json: TEST_WORKSHOP });
+    if (route.request().resourceType() === 'fetch') {
+      await route.fulfill({ json: TEST_WORKSHOP });
+    } else {
+      await route.fallback();
+    }
   });
 
-  await page.route((url) => url.toString().includes(`/rubric`), async route => {
-    if (!isApiCall(route)) return route.fallback();
-    await route.fulfill({ json: { criteria: [] } });
+  // 5. Rubric Mock
+  await page.route('**/rubric', async route => {
+    if (route.request().resourceType() === 'fetch') {
+      await route.fulfill({ json: { criteria: [] } });
+    } else {
+      await route.fallback();
+    }
   });
 
   // TEST
