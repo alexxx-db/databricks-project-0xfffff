@@ -14,17 +14,23 @@ This release includes a pre-built client application so you can clone and run im
    cd project-0xfffff
    ```
 
-2. **Run the server:**
+2. **Download the pre-built client:**
+   - Go to the [Releases page](https://github.com/databricks-solutions/project-0xfffff/releases)
+   - Download `client-build.tar.gz` from the latest release
+   - Extract it:
+   ```bash
+   tar -xzf client-build.tar.gz -C client/build/
+   ```
+
+3. **Run the server:**
    ```bash
    uv run uvicorn server.app:app --reload --port 8000
    ```
 
-3. **Open your browser:**
+4. **Open your browser:**
    ```
    http://localhost:8000
    ```
-
-**That's it!** The pre-built client is already included in `client/build/` - no build step required.
 
 ### Build Client Yourself (For Development Only)
 
