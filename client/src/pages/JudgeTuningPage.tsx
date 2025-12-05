@@ -561,16 +561,26 @@ The response partially meets the criteria because...`;
             if (status.result?.success) {
               setMetrics(status.result.metrics || null);
               setEvaluations(status.result.evaluations || []);
-                  setHasEvaluated(true);
-                  setEvaluationComplete(true);
-                  toast.success('Evaluation complete!');
-                  const storageKey = `judge-evaluations-${workshopId}`;
-                  localStorage.setItem(storageKey, JSON.stringify({
+              setHasEvaluated(true);
+              setEvaluationComplete(true);
+              toast.success('Evaluation complete!');
+              
+              // If backend saved it as a version, update our state to reflect that
+              if (status.result.saved_prompt_id) {
+                const updatedPrompts = await WorkshopsService.getJudgePromptsWorkshopsWorkshopIdJudgePromptsGet(workshopId);
+                setPrompts(updatedPrompts);
+                setSelectedPromptId(status.result.saved_prompt_id);
+                setOriginalPromptText(currentPrompt); // It's now saved, so not modified
+                setIsModified(false);
+              }
+
+              const storageKey = `judge-evaluations-${workshopId}`;
+              localStorage.setItem(storageKey, JSON.stringify({
                 evaluations: status.result.evaluations || [],
                 metrics: status.result.metrics || null,
-                    timestamp: Date.now(),
-                  }));
-                }
+                timestamp: Date.now(),
+              }));
+            }
             setIsRunningEvaluation(false);
             return;
           }

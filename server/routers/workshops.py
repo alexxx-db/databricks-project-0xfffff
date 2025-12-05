@@ -2275,6 +2275,51 @@ async def start_evaluation_job(
             logger.info("Evaluation log: %s", message[:100] if len(message) > 100 else message)
         
         if result and result.get("success"):
+          # Save the evaluated prompt as a new version with metrics and evaluations
+          try:
+            from server.models import JudgePromptCreate, JudgeEvaluation
+            
+            # 1. Create new prompt version
+            new_prompt_data = JudgePromptCreate(
+              prompt_text=request.judge_prompt,
+              few_shot_examples=[],  # TODO: Pass these if available in request
+              model_name=request.evaluation_model_name,
+              model_parameters={}, 
+            )
+            new_prompt = thread_db_service.create_judge_prompt(workshop_id, new_prompt_data)
+            result["saved_prompt_id"] = new_prompt.id
+            result["saved_prompt_version"] = new_prompt.version
+            
+            # 2. Save metrics
+            if "metrics" in result:
+              thread_db_service.update_judge_prompt_metrics(new_prompt.id, result["metrics"])
+            
+            # 3. Save individual evaluations
+            if "evaluations" in result:
+              evaluations_to_save = []
+              for eval_data in result["evaluations"]:
+                evaluations_to_save.append(
+                  JudgeEvaluation(
+                    id=str(uuid.uuid4()),
+                    workshop_id=workshop_id,
+                    prompt_id=new_prompt.id,
+                    trace_id=eval_data["trace_id"],
+                    predicted_rating=int(round(float(eval_data["predicted_rating"]))) if eval_data.get("predicted_rating") is not None else 0,
+                    human_rating=int(eval_data["human_rating"]) if eval_data.get("human_rating") is not None else 0,
+                    confidence=eval_data.get("confidence"),
+                    reasoning=eval_data.get("reasoning")
+                  )
+                )
+              thread_db_service.store_judge_evaluations(evaluations_to_save)
+              job.add_log(f"Saved {len(evaluations_to_save)} trace evaluations to database")
+
+            job.add_log(f"Saved evaluation results as Judge Prompt v{new_prompt.version}")
+            logger.info("Saved evaluation results as prompt %s (v%d)", new_prompt.id, new_prompt.version)
+            
+          except Exception as save_err:
+            logger.warning("Failed to save evaluation results to database: %s", save_err)
+            job.add_log(f"WARNING: Could not save evaluation results to database: {save_err}")
+
           job.set_status("completed")
           job.add_log("Evaluation completed successfully")
         else:
