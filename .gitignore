@@ -7,8 +7,9 @@ __pycache__
 .env
 node_modules/
 client/node_modules/
-client/build/*
-!client/build/README.md
+# Allow client/build for deployment (built files needed for Databricks Apps)
+# client/build/*
+# !client/build/README.md
 env.local
 .venv/
 .venv
