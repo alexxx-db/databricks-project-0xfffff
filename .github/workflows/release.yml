@@ -3,6 +3,7 @@ name: Build and Release
 on:
   release:
     types: [created]
+  workflow_dispatch:  # Allows manual trigger from GitHub Actions UI
 
 jobs:
   build-and-attach:
@@ -22,16 +23,21 @@ jobs:
           cd client
           npm install
           npm run build
-          cd ..
       
-      - name: Create client build archive
+      - name: Create full release archive
         run: |
-          tar -czf client-build.tar.gz -C client/build .
+          zip -r project-with-build.zip . \
+            -x "client/node_modules/*" \
+            -x ".git/*" \
+            -x "*.db" \
+            -x "__pycache__/*" \
+            -x "*.pyc" \
+            -x "client/test-results/*" \
+            -x "*.png"
       
-      - name: Upload client build to release
+      - name: Upload to release
         uses: softprops/action-gh-release@v1
         with:
-          files: client-build.tar.gz
+          files: project-with-build.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
