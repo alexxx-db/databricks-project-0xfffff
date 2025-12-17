@@ -11,7 +11,6 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from server.config import ServerConfig
-from server.database import create_tables
 from server.routers import router
 
 
@@ -19,30 +18,6 @@ from server.routers import router
 async def lifespan(app: FastAPI):
   """Manage application lifespan with proper startup and shutdown."""
   print('🚀 Application startup - lifespan function called!')
-
-  # Create database tables on startup
-  try:
-    print('🔧 Creating database tables on startup...')
-    create_tables()
-    print('✅ Database tables created successfully')
-
-    # Verify database is working
-    from sqlalchemy import text
-
-    from server.database import get_db
-
-    db = next(get_db())
-    result = db.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
-    tables = [row[0] for row in result.fetchall()]
-    print(f'📊 Database initialized with {len(tables)} tables: {tables}')
-    db.close()
-
-  except Exception as e:
-    print(f'❌ Failed to create database tables: {e}')
-    import traceback
-
-    traceback.print_exc()
-    raise e
 
   print('✅ Application startup complete!')
   yield
@@ -82,30 +57,6 @@ class DatabaseErrorMiddleware(BaseHTTPMiddleware):
         )
       raise
 
-
-# Create database tables immediately when the app is imported
-print('🚀 Application initialization - creating database tables...')
-try:
-  create_tables()
-  print('✅ Database tables created successfully during app initialization')
-
-  # Verify database is working
-  from sqlalchemy import text
-
-  from server.database import get_db
-
-  db = next(get_db())
-  result = db.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
-  tables = [row[0] for row in result.fetchall()]
-  print(f'📊 Database initialized with {len(tables)} tables: {tables}')
-  db.close()
-
-except Exception as e:
-  print(f'❌ Failed to create database tables during app initialization: {e}')
-  import traceback
-
-  traceback.print_exc()
-  # Don't raise the exception to allow the app to start
 
 app = FastAPI(
   title='Databricks App API',

@@ -65,6 +65,8 @@ setup-python:
   @uv venv --python 3.11
   @echo "📦 Installing Python dependencies..."
   @uv pip install -r requirements.txt
+  @echo "🧰 Installing dev tooling (includes alembic for migrations)..."
+  @uv pip install -e ".[dev]"
 
 setup-client:
   @echo "📦 Installing frontend dependencies..."
@@ -257,17 +259,79 @@ ui-lint:
 ui-format:
   npm -C {{client-dir}} run format
 
+[group('db')]
+db-upgrade:
+  uv run alembic upgrade head
+
+[group('db')]
+db-stamp:
+  uv run alembic stamp head
+
+[group('db')]
+db-revision message:
+  uv run alembic revision --autogenerate -m "{{message}}"
+
+[script]
+db-bootstrap:
+  import os
+  import sqlite3
+  import subprocess
+
+  def _db_path_from_url(url: str) -> str:
+    if url.startswith("sqlite:///"):
+      return url.replace("sqlite:///", "", 1)
+    if url.startswith("sqlite://"):
+      return url.replace("sqlite://", "", 1)
+    return url
+
+  url = os.getenv("DATABASE_URL", "sqlite:///./workshop.db")
+  db_path = _db_path_from_url(url)
+
+  def _run(*args: str) -> None:
+    cmd = ["uv", "run", "alembic", *args]
+    print(" ".join(cmd))
+    subprocess.check_call(cmd)
+
+  # No DB file yet: create via migrations.
+  if not os.path.exists(db_path):
+    _run("upgrade", "head")
+    raise SystemExit(0)
+
+  # If DB exists, decide between stamp and upgrade based on alembic_version table.
+  with sqlite3.connect(db_path) as conn:
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    tables = [r[0] for r in cur.fetchall()]
+
+  user_tables = [t for t in tables if t and not t.startswith("sqlite_")]
+  has_alembic_version = "alembic_version" in tables
+
+  if user_tables and not has_alembic_version:
+    # Stamp to the baseline revision (not "head") so that legacy-fix migrations
+    # can still run and bring older DBs up to date.
+    _run("stamp", "0001_baseline")
+
+  _run("upgrade", "head")
+
 [group('dev')]
 py-install-dev:
   uv pip install -e ".[dev]"
 
 [group('dev')]
 api-dev port="8000":
+  just db-bootstrap
   uv run uvicorn {{server-dir}}.app:app --reload --port {{port}}
 
 [group('dev')]
 api port="8000":
+  just db-bootstrap
   uv run uvicorn {{server-dir}}.app:app --port {{port}}
+
+[group('app')]
+deploy:
+  just ui-build
+  just db-bootstrap
+  SKIP_UI_BUILD=1 ./deploy.sh
 
 [group('dev')]
 dev api_port="8000" ui_port="5173":
@@ -277,27 +341,20 @@ dev api_port="8000" ui_port="5173":
   API_PORT="{{api_port}}"
   UI_PORT="{{ui_port}}"
 
-  prefix() {
-    local label="$1"
-    local color="$2"
-    # Line-prefix output for readability when running multiple processes
-    while IFS= read -r line; do
-      printf "%b[%s]%b %s\n" "$color" "$label" $'\033[0m' "$line"
-    done
-  }
-
   echo "🚀 Starting dev environment"
   echo "  API: http://localhost:${API_PORT}"
   echo "  UI : http://localhost:${UI_PORT}"
   echo ""
 
+  just db-bootstrap
+
   # Start API
-  (uv run uvicorn {{server-dir}}.app:app --reload --port "$API_PORT" 2>&1 | prefix api $'\033[34m') &
+  (uv run uvicorn {{server-dir}}.app:app --reload --port "$API_PORT") &
   api_pid=$!
 
   # Start UI
   # Note: Vite's port is controlled in client config; `UI_PORT` is informational unless wired into Vite args.
-  (npm -C {{client-dir}} run dev 2>&1 | prefix ui $'\033[32m') &
+  (npm -C {{client-dir}} run dev) &
   ui_pid=$!
 
   cleanup() {
