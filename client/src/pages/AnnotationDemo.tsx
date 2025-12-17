@@ -244,17 +244,12 @@ export function AnnotationDemo() {
     const ratingKeys = Object.keys(currentRatings);
     const originalRatingKeys = Object.keys(originalRatings);
     
-    // If originalRatings is empty, this might be a newly created annotation
-    // being navigated away from, or we haven't loaded the original yet
-    // In this case, consider it as having changes if currentRatings exist
-    if (originalRatingKeys.length === 0 && ratingKeys.length > 0) {
-      // Check if this is actually a submitted annotation
-      // If it's submitted and originalRatings is empty, it means we haven't
-      // loaded the original values yet, so we should NOT consider it changed
-      if (submittedAnnotations.has(currentTrace?.id || '')) {
-        return false; // Don't save if it's already submitted and we haven't loaded original
-      }
-      return true; // New annotation, has changes
+    // If there are current ratings, be lenient and allow saving
+    // The backend does upsert anyway, so it's safe to save even if unchanged
+    if (ratingKeys.length > 0 && originalRatingKeys.length === 0) {
+      // We have ratings but no original - could be new or loaded state is stale
+      // Be safe and return true to allow saving
+      return true;
     }
     
     if (ratingKeys.length !== originalRatingKeys.length) {
@@ -502,9 +497,8 @@ export function AnnotationDemo() {
       }
     }
     
-    // Navigate to next trace
+    // Navigate to next trace or show completion message
     if (currentTraceIndex < traceData.length - 1) {
-      
       setHasNavigatedManually(true);
       setCurrentTraceIndex(prev => prev + 1);
       // Reset form for next trace
@@ -512,7 +506,8 @@ export function AnnotationDemo() {
       setFreeformResponses({});
       setComment('');
     } else {
-      
+      // On the last trace, show completion message
+      toast.success('All traces annotated! Great work.');
     }
   };
 

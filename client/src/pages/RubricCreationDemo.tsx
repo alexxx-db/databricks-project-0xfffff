@@ -5,7 +5,7 @@
  * After discovery, facilitators create Likert scale questions for annotation.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -179,7 +179,7 @@ export function RubricCreationDemo() {
   });
   const [isEditingExisting, setIsEditingExisting] = useState(false);
   const [viewMode, setViewMode] = useState<'grid' | 'focused'>('focused');
-  const [scratchPad, setScratchPad] = useState<ScratchPadEntry[]>([]);
+  const [scratchPad, setScratchPadState] = useState<ScratchPadEntry[]>([]);
   const [updatingQuestionId, setUpdatingQuestionId] = useState<string | null>(null);
   const [lastUpdatedQuestionId, setLastUpdatedQuestionId] = useState<string | null>(null);
   
@@ -218,6 +218,31 @@ export function RubricCreationDemo() {
   // Get discovery responses from real findings data, enriched with trace information
   const discoveryResponses = useDiscoveryResponses(findings, traces);
   
+  // Helper to save scratch pad immediately to localStorage
+  const saveScratchPadToStorage = useCallback((entries: ScratchPadEntry[]) => {
+    if (!workshopId) return;
+    const storageKey = `scratch-pad-${workshopId}`;
+    if (entries.length > 0) {
+      const dataToSave = {
+        timestamp: Date.now(),
+        scratchPad: entries
+      };
+      localStorage.setItem(storageKey, JSON.stringify(dataToSave));
+    } else {
+      localStorage.removeItem(storageKey);
+    }
+  }, [workshopId]);
+  
+  // Wrapper that saves immediately when setting scratch pad
+  const setScratchPad = useCallback((value: ScratchPadEntry[] | ((prev: ScratchPadEntry[]) => ScratchPadEntry[])) => {
+    setScratchPadState(prev => {
+      const newValue = typeof value === 'function' ? value(prev) : value;
+      // Save immediately to localStorage
+      saveScratchPadToStorage(newValue);
+      return newValue;
+    });
+  }, [saveScratchPadToStorage]);
+
   // Load scratch pad from localStorage on mount
   useEffect(() => {
     if (workshopId) {
@@ -226,40 +251,18 @@ export function RubricCreationDemo() {
       if (storedData) {
         try {
           const parsed = JSON.parse(storedData);
-          // Only load if data is less than 24 hours old
-          if (Date.now() - parsed.timestamp < 24 * 60 * 60 * 1000) {
-            
-            setScratchPad(parsed.scratchPad);
+          // Only load if data is less than 7 days old (extended from 24 hours)
+          if (Date.now() - parsed.timestamp < 7 * 24 * 60 * 60 * 1000) {
+            setScratchPadState(parsed.scratchPad);
           } else {
-            
             localStorage.removeItem(storageKey);
           }
         } catch (error) {
-          
           localStorage.removeItem(storageKey);
         }
       }
     }
   }, [workshopId]);
-  
-  // Save scratch pad to localStorage whenever it changes
-  useEffect(() => {
-    if (workshopId) {
-      const storageKey = `scratch-pad-${workshopId}`;
-      if (scratchPad.length > 0) {
-        const dataToSave = {
-          timestamp: Date.now(),
-          scratchPad: scratchPad
-        };
-        localStorage.setItem(storageKey, JSON.stringify(dataToSave));
-        
-      } else {
-        // Clear localStorage when scratch pad is empty
-        localStorage.removeItem(storageKey);
-        
-      }
-    }
-  }, [scratchPad, workshopId]);
   
   // Initialize questions and judge type from API data
   useEffect(() => {

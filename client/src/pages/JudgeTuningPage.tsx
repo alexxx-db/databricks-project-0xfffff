@@ -70,8 +70,12 @@ export function JudgeTuningPage() {
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [mlflowConfig, setMlflowConfig] = useState<any>(null);
   
-  // Judge type - derived from rubric (set during rubric creation)
-  const judgeType: JudgeType = rubric?.judge_type || 'likert';
+  // Judge type - derived from the first rubric question (set during rubric creation)
+  // Parse the rubric to get the actual judge type from questions
+  const parsedRubricQuestions = rubric?.question ? parseRubricQuestions(rubric.question) : [];
+  const judgeType: JudgeType = parsedRubricQuestions.length > 0 
+    ? parsedRubricQuestions[0].judgeType 
+    : (rubric?.judge_type || 'likert');
   const binaryLabels: Record<string, string> = rubric?.binary_labels || { pass: 'Pass', fail: 'Fail' };
   
   // Track if current prompt differs from saved version

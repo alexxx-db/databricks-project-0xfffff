@@ -741,6 +741,57 @@ async def begin_annotation_phase(workshop_id: str, request: dict = {}, db: Sessi
   }
 
 
+@router.delete('/{workshop_id}/traces')
+async def delete_all_traces(workshop_id: str, db: Session = Depends(get_db)):
+  """Delete all traces for a workshop and reset to intake phase (facilitator only).
+  
+  This allows starting over with new trace data.
+  """
+  db_service = DatabaseService(db)
+  workshop = db_service.get_workshop(workshop_id)
+  if not workshop:
+    raise HTTPException(status_code=404, detail='Workshop not found')
+
+  # Delete all traces (this also resets workshop phase to INTAKE)
+  deleted_count = db_service.delete_all_traces(workshop_id)
+  
+  return {
+    'message': f'Deleted {deleted_count} traces and reset workshop to intake phase',
+    'deleted_count': deleted_count,
+    'workshop_id': workshop_id,
+    'current_phase': 'intake',
+  }
+
+
+@router.post('/{workshop_id}/reset-discovery')
+async def reset_discovery(workshop_id: str, db: Session = Depends(get_db)):
+  """Reset a workshop back to before discovery phase started (facilitator only).
+  
+  This allows changing the discovery configuration (e.g., number of traces).
+  Traces are kept, but the phase is reset so discovery can be reconfigured.
+  """
+  db_service = DatabaseService(db)
+  workshop = db_service.get_workshop(workshop_id)
+  if not workshop:
+    raise HTTPException(status_code=404, detail='Workshop not found')
+
+  # Reset workshop to pre-discovery state
+  updated_workshop = db_service.reset_workshop_to_discovery(workshop_id)
+  
+  if not updated_workshop:
+    raise HTTPException(status_code=500, detail='Failed to reset workshop')
+  
+  traces = db_service.get_traces(workshop_id)
+  
+  return {
+    'message': 'Discovery reset. You can now select a different trace configuration.',
+    'workshop_id': workshop_id,
+    'current_phase': updated_workshop.current_phase,
+    'discovery_started': updated_workshop.discovery_started,
+    'traces_available': len(traces),
+  }
+
+
 @router.post('/{workshop_id}/advance-to-discovery')
 async def advance_to_discovery(workshop_id: str, db: Session = Depends(get_db)):
   """Advance workshop from INTAKE to DISCOVERY phase (facilitator only)."""

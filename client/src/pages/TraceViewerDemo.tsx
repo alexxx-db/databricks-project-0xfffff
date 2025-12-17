@@ -199,10 +199,9 @@ export function TraceViewerDemo() {
   const nextTrace = async () => {
     if (!currentTrace) return;
     
-    // Auto-submit finding if not already submitted and responses are filled
-    if (!submittedFindings.has(currentTrace.id) && 
-        question1Response.trim() && 
-        question2Response.trim()) {
+    // Auto-save finding if responses are filled (works for both new and updated answers)
+    if (question1Response.trim() && question2Response.trim()) {
+      const isUpdate = submittedFindings.has(currentTrace.id);
       try {
         await submitFinding.mutateAsync({
           trace_id: currentTrace.id,
@@ -210,8 +209,13 @@ export function TraceViewerDemo() {
           insight: `Quality Assessment: ${question1Response.trim()}\n\nImprovement Analysis: ${question2Response.trim()}`
         });
         setSubmittedFindings(prev => new Set([...prev, currentTrace.id]));
-      } catch (error) {
         
+        // Show toast for updates
+        if (isUpdate) {
+          toast.success('Answer updated!');
+        }
+      } catch (error) {
+        toast.error('Failed to save. Please try again.');
         return; // Don't navigate if submission failed
       }
     }
@@ -274,10 +278,8 @@ export function TraceViewerDemo() {
       });
       
       setSubmittedFindings(prev => new Set([...prev, currentTrace.id]));
-      setQuestion1Response('');
-      setQuestion2Response('');
     } catch (error) {
-      
+      toast.error('Failed to save finding. Please try again.');
     }
   };
 

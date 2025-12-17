@@ -1,4 +1,9 @@
-"""Service for judge alignment using MLflow and LikertSIMBAAlignmentOptimizer."""
+"""Service for judge alignment using MLflow and LikertSIMBAAlignmentOptimizer.
+
+Supports both Likert scale (1-5) and Binary (Pass/Fail) judge types.
+- Likert judges use LikertSIMBAAlignmentOptimizer with custom agreement metric
+- Binary judges use the default SIMBAAlignmentOptimizer from MLflow
+"""
 
 import logging
 import math
@@ -21,6 +26,10 @@ logger = logging.getLogger(__name__)
 # Likert scale configuration (hardcoded per user requirements)
 LIKERT_MIN = 1
 LIKERT_MAX = 5
+
+# Binary judge configuration
+BINARY_PASS_VALUE = 1.0
+BINARY_FAIL_VALUE = 0.0
 
 
 def _to_float_maybe(x: Any) -> Optional[float]:
@@ -90,6 +99,105 @@ def likert_agreement_metric(example: Any, prediction: Any) -> float:
 
     score = max(0.0, 1.0 - abs(llm - human) / (LIKERT_MAX - LIKERT_MIN))
     return score
+
+
+def binary_agreement_metric(example: Any, prediction: Any) -> float:
+    """
+    Binary agreement metric for Pass/Fail judges.
+    Returns 1.0 if both agree, 0.0 if they disagree.
+
+    For binary judges, values are typically:
+      - Pass/Yes/Safe = 1.0
+      - Fail/No/Unsafe = 0.0
+    
+    Or string labels like "PASS"/"FAIL" which get converted.
+    """
+    metric_logger = logging.getLogger("dspy.teleprompt.simba")
+
+    human = None
+    llm = None
+
+    def _to_binary(val: Any) -> Optional[float]:
+        """Convert various representations to binary 0/1."""
+        if val is None:
+            return None
+        if isinstance(val, (int, float)):
+            # Treat >= 0.5 as pass (1), < 0.5 as fail (0)
+            return 1.0 if val >= 0.5 else 0.0
+        if isinstance(val, str):
+            val_lower = val.lower().strip()
+            if val_lower in ('pass', 'yes', 'safe', 'good', 'true', '1'):
+                return 1.0
+            if val_lower in ('fail', 'no', 'unsafe', 'bad', 'false', '0'):
+                return 0.0
+            # Try to parse as number
+            try:
+                num = float(val)
+                return 1.0 if num >= 0.5 else 0.0
+            except ValueError:
+                return None
+        if isinstance(val, bool):
+            return 1.0 if val else 0.0
+        return None
+
+    # Primary: read from example._store / prediction._store
+    ex_store = getattr(example, "_store", None)
+    if isinstance(ex_store, dict) and "result" in ex_store:
+        human = _to_binary(ex_store["result"])
+
+    pred_store = getattr(prediction, "_store", None)
+    if isinstance(pred_store, dict) and "result" in pred_store:
+        llm = _to_binary(pred_store["result"])
+
+    # Fallbacks for human value
+    if human is None:
+        for key in ("human_score", "human_value", "label", "target", "score", "y", "pass", "verdict"):
+            if hasattr(example, key):
+                human = _to_binary(getattr(example, key))
+                if human is not None:
+                    break
+            if isinstance(example, dict) and key in example:
+                human = _to_binary(example[key])
+                if human is not None:
+                    break
+
+    # Fallbacks for LLM prediction
+    if llm is None:
+        if isinstance(prediction, dict):
+            for k in ("llm_score", "value", "score", "rating", "label", "y_hat", "pass", "verdict"):
+                if k in prediction:
+                    llm = _to_binary(prediction[k])
+                    if llm is not None:
+                        break
+        if llm is None:
+            llm = _to_binary(prediction)
+
+    if human is None or llm is None:
+        metric_logger.info(
+            "BINARY: missing values (human=%r, llm=%r) -> 0.0",
+            human,
+            llm,
+        )
+        return 0.0
+
+    # Binary agreement: 1.0 if same, 0.0 if different
+    agreement = 1.0 if human == llm else 0.0
+    metric_logger.debug("BINARY: human=%s, llm=%s -> agreement=%s", human, llm, agreement)
+    return agreement
+
+
+def get_judge_type_from_rubric(db_service: DatabaseService, workshop_id: str) -> str:
+    """Get the judge type from the workshop's rubric.
+    
+    Returns 'likert', 'binary', or 'freeform'. Defaults to 'likert' if not set.
+    """
+    try:
+        rubric = db_service.get_rubric(workshop_id)
+        if rubric and hasattr(rubric, 'judge_type') and rubric.judge_type:
+            return rubric.judge_type
+    except Exception as e:
+        logger.warning("Could not get rubric judge_type for workshop %s: %s", workshop_id, e)
+    return 'likert'  # Default
 
 
 class LikertSIMBAAlignmentOptimizer:
@@ -355,14 +463,88 @@ class AlignmentService:
         }
 
     @staticmethod
-    def _calculate_eval_metrics(evaluations: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Compute Cohen's κ, accuracy, and related stats for evaluation results."""
+    def _calculate_eval_metrics(evaluations: List[Dict[str, Any]], judge_type: str = 'likert') -> Dict[str, Any]:
+        """Compute Cohen's κ, accuracy, and related stats for evaluation results.
+        
+        Args:
+            evaluations: List of evaluation dictionaries with human_rating and predicted_rating
+            judge_type: 'likert' for 1-5 scale, 'binary' for pass/fail
+        """
         valid_pairs = [
             (e.get('human_rating'), e.get('predicted_rating'))
             for e in evaluations
             if isinstance(e.get('human_rating'), (int, float)) and isinstance(e.get('predicted_rating'), (int, float))
         ]
         total = len(valid_pairs)
+        
+        # Handle binary judges differently
+        if judge_type == 'binary':
+            default_matrix = [[0, 0], [0, 0]]  # 2x2 for binary
+            default_agreement = {'pass': 0.0, 'fail': 0.0}
+            
+            if total == 0:
+                return {
+                    'correlation': 0.0,
+                    'accuracy': 0.0,
+                    'mean_absolute_error': 0.0,
+                    'agreement_by_rating': default_agreement,
+                    'confusion_matrix': default_matrix,
+                    'total_evaluations': 0,
+                    'judge_type': 'binary',
+                }
+            
+            # Convert to binary: >= 0.5 is pass (1), < 0.5 is fail (0)
+            humans = [1 if h >= 0.5 else 0 for h, _ in valid_pairs]
+            preds = [1 if p >= 0.5 else 0 for _, p in valid_pairs]
+            
+            matches = sum(1 for h, p in zip(humans, preds, strict=False) if h == p)
+            simple_agreement = matches / total if total else 0.0
+            
+            try:
+                kappa = cohen_kappa_score(humans, preds)
+            except Exception:
+                kappa = simple_agreement
+            if math.isnan(kappa):
+                kappa = simple_agreement
+            
+            try:
+                accuracy = accuracy_score(humans, preds)
+            except Exception:
+                accuracy = simple_agreement
+            
+            # For binary, agreement by pass/fail
+            agreement_by_rating = {}
+            for label, value in [('pass', 1), ('fail', 0)]:
+                label_preds = [p for h, p in zip(humans, preds, strict=False) if h == value]
+                if label_preds:
+                    label_matches = sum(1 for p in label_preds if p == value)
+                    agreement_by_rating[label] = label_matches / len(label_preds)
+                else:
+                    agreement_by_rating[label] = 0.0
+            
+            try:
+                cm = confusion_matrix(humans, preds, labels=[0, 1]).tolist()
+            except Exception:
+                cm = default_matrix
+            
+            logger.info(
+                "Computed BINARY evaluation metrics: kappa=%.3f accuracy=%.3f (n=%d)",
+                kappa,
+                accuracy,
+                total,
+            )
+            
+            return {
+                'correlation': float(kappa),
+                'accuracy': float(accuracy),
+                'mean_absolute_error': 0.0,  # Not meaningful for binary
+                'agreement_by_rating': agreement_by_rating,
+                'confusion_matrix': cm,
+                'total_evaluations': total,
+                'judge_type': 'binary',
+            }
+        
+        # Likert scale (default)
         default_matrix = [[0] * 5 for _ in range(5)]
         default_agreement = {str(r): 0.0 for r in range(1, 6)}
 
@@ -374,12 +556,13 @@ class AlignmentService:
                 'agreement_by_rating': default_agreement,
                 'confusion_matrix': default_matrix,
                 'total_evaluations': 0,
+                'judge_type': 'likert',
             }
 
         humans = [int(h) for h, _ in valid_pairs]
         preds = [int(round(p)) for _, p in valid_pairs]
 
-        matches = sum(1 for h, p in zip(humans, preds) if h == p)
+        matches = sum(1 for h, p in zip(humans, preds, strict=False) if h == p)
         simple_agreement = matches / total if total else 0.0
 
         try:
@@ -394,11 +577,11 @@ class AlignmentService:
         except Exception:
             accuracy = simple_agreement
 
-        mean_abs_error = sum(abs(h - p) for h, p in zip(humans, preds)) / total if total else 0.0
+        mean_abs_error = sum(abs(h - p) for h, p in zip(humans, preds, strict=False)) / total if total else 0.0
 
         agreement_by_rating: Dict[str, float] = {}
         for rating in range(1, 6):
-            rating_preds = [p for h, p in zip(humans, preds) if h == rating]
+            rating_preds = [p for h, p in zip(humans, preds, strict=False) if h == rating]
             if rating_preds:
                 rating_matches = sum(1 for p in rating_preds if p == rating)
                 agreement_by_rating[str(rating)] = rating_matches / len(rating_preds)
@@ -411,7 +594,7 @@ class AlignmentService:
             cm = default_matrix
 
         logger.info(
-            "Computed evaluation metrics: kappa=%.3f accuracy=%.3f (n=%d)",
+            "Computed LIKERT evaluation metrics: kappa=%.3f accuracy=%.3f (n=%d)",
             kappa,
             accuracy,
             total,
@@ -424,6 +607,7 @@ class AlignmentService:
             'agreement_by_rating': agreement_by_rating,
             'confusion_matrix': cm,
             'total_evaluations': total,
+            'judge_type': 'likert',
         }
 
     def run_evaluation_with_answer_sheet(
@@ -644,14 +828,19 @@ class AlignmentService:
             else:
                 yield f"WARNING: Result DataFrame is None"
             
-            # Extract results
-            metrics_payload = self._calculate_eval_metrics(evaluations)
+            # Get judge type for appropriate metrics calculation
+            judge_type = get_judge_type_from_rubric(self.db_service, workshop_id)
+            yield f"Computing metrics for judge type: {judge_type}"
+            
+            # Extract results with appropriate metrics for judge type
+            metrics_payload = self._calculate_eval_metrics(evaluations, judge_type=judge_type)
             evaluation_results = {
                 'judge_name': judge_name,
                 'trace_count': len(trace_ids_for_eval),
                 'metrics': metrics_payload,
                 'evaluations': evaluations,
                 'success': True,
+                'judge_type': judge_type,
             }
             
             yield f"Evaluation results prepared for {len(evaluations)} traces"
@@ -742,16 +931,29 @@ class AlignmentService:
                 judge_model_uri = f'databricks:/{evaluation_model_name}'
             
             normalized_judge_prompt = self._normalize_judge_prompt(judge_prompt)
+            
+            # Get judge type from rubric to determine feedback_value_type
+            judge_type = get_judge_type_from_rubric(self.db_service, workshop_id)
+            
+            # Set feedback_value_type based on judge type
+            # - Binary judges: use bool for Pass/Fail classification
+            # - Likert judges: use float for 1-5 scale
+            if judge_type == 'binary':
+                feedback_type = bool
+                yield f"Creating binary judge with feedback_value_type=bool"
+            else:
+                feedback_type = float
+                yield f"Creating Likert judge with feedback_value_type=float"
 
-            # Create judge with feedback_value_type for 1-5 Likert scale
+            # Create judge with appropriate feedback_value_type
             judge = make_judge(
                 name=judge_name,
                 instructions=normalized_judge_prompt,
-                feedback_value_type=float,
+                feedback_value_type=feedback_type,
                 model=judge_model_uri,
             )
             
-            logger.info("Judge '%s' created using model '%s'", judge.name, judge_model_uri)
+            logger.info("Judge '%s' created using model '%s' (type=%s)", judge.name, judge_model_uri, judge_type)
             yield f"Initial Judge Text:\n{judge.instructions}"
             
             # Determine model URI for the optimizer
@@ -780,17 +982,44 @@ class AlignmentService:
                 lg.propagate = False
                 lg.addHandler(log_handler)
             
-            # Create the optimizer
-            yield "Creating LikertSIMBA optimizer..."
+            # Check judge type from rubric to determine which optimizer to use
+            judge_type = get_judge_type_from_rubric(self.db_service, workshop_id)
+            logger.info("Detected judge type from rubric: %s", judge_type)
+            yield f"Detected judge type: {judge_type}"
             
-            optimizer = LikertSIMBAAlignmentOptimizer(
-                model=optimizer_model_uri,
-                batch_size=6,
-                max_demos=0,
-                verbose=True,
-            )
+            # Create the appropriate optimizer based on judge type
+            if judge_type == 'binary':
+                # For binary judges, use MLflow's default SIMBAAlignmentOptimizer
+                # This is optimized for Pass/Fail classification
+                yield "Creating Binary SIMBA optimizer (using MLflow default)..."
+                
+                try:
+                    from mlflow.genai.judges.optimizers import SIMBAAlignmentOptimizer
+                    
+                    optimizer = SIMBAAlignmentOptimizer(
+                        model=optimizer_model_uri,
+                    )
+                    yield f"Binary optimizer created with model={optimizer_model_uri}"
+                    yield "Using MLflow's default SIMBA for binary Pass/Fail optimization"
+                except ImportError as e:
+                    error_msg = f"MLflow SIMBA optimizer not available: {e}"
+                    yield f"ERROR: {error_msg}"
+                    yield {"error": error_msg, "success": False}
+                    return
+            else:
+                # For Likert scale judges (default), use custom LikertSIMBAAlignmentOptimizer
+                # This uses a custom agreement metric for 1-5 scale
+                yield "Creating Likert SIMBA optimizer..."
+                
+                optimizer = LikertSIMBAAlignmentOptimizer(
+                    model=optimizer_model_uri,
+                    batch_size=6,
+                    max_demos=0,
+                    verbose=True,
+                )
+                yield f"Likert optimizer created with model={optimizer_model_uri}, batch_size=6"
+                yield "Using custom Likert agreement metric for 1-5 scale optimization"
             
-            yield f"Optimizer created with model={optimizer_model_uri}, batch_size=6"
             yield f"Running alignment with {len(mlflow_traces)} traces... (this may take 20+ minutes)"
             
             # Run alignment in background thread so we can yield logs periodically

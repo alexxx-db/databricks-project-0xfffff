@@ -515,18 +515,33 @@ class DatabaseService:
 
   # Discovery finding operations
   def add_finding(self, workshop_id: str, finding_data: DiscoveryFindingCreate) -> DiscoveryFinding:
-    """Add a discovery finding."""
-    finding_id = str(uuid.uuid4())
-    db_finding = DiscoveryFindingDB(
-      id=finding_id,
-      workshop_id=workshop_id,
-      trace_id=finding_data.trace_id,
-      user_id=finding_data.user_id,
-      insight=finding_data.insight,
-    )
-    self.db.add(db_finding)
-    self.db.commit()
-    self.db.refresh(db_finding)
+    """Add or update a discovery finding (upsert)."""
+    # Check if finding already exists for this trace and user
+    existing_finding = self.db.query(DiscoveryFindingDB).filter(
+      DiscoveryFindingDB.workshop_id == workshop_id,
+      DiscoveryFindingDB.trace_id == finding_data.trace_id,
+      DiscoveryFindingDB.user_id == finding_data.user_id
+    ).first()
+    
+    if existing_finding:
+      # Update existing finding
+      existing_finding.insight = finding_data.insight
+      self.db.commit()
+      self.db.refresh(existing_finding)
+      db_finding = existing_finding
+    else:
+      # Create new finding
+      finding_id = str(uuid.uuid4())
+      db_finding = DiscoveryFindingDB(
+        id=finding_id,
+        workshop_id=workshop_id,
+        trace_id=finding_data.trace_id,
+        user_id=finding_data.user_id,
+        insight=finding_data.insight,
+      )
+      self.db.add(db_finding)
+      self.db.commit()
+      self.db.refresh(db_finding)
 
     return DiscoveryFinding(
       id=db_finding.id,
@@ -1894,3 +1909,80 @@ class DatabaseService:
         feedback_parts.append(f"[{ann.user_id}]: {ann.comment.strip()}")
     
     return "\n\n".join(feedback_parts) if feedback_parts else None
+
+  def delete_all_traces(self, workshop_id: str) -> int:
+    """Delete all traces for a workshop and reset to intake phase.
+    
+    Returns the number of traces deleted.
+    """
+    # First, delete all annotations for these traces
+    from server.database import AnnotationDB, UserTraceOrderDB
+    
+    # Get trace IDs first
+    trace_ids = [t.id for t in self.db.query(TraceDB).filter(TraceDB.workshop_id == workshop_id).all()]
+    
+    if trace_ids:
+      # Delete annotations for these traces
+      self.db.query(AnnotationDB).filter(AnnotationDB.trace_id.in_(trace_ids)).delete(synchronize_session=False)
+    
+    # Delete user trace orders for this workshop
+    self.db.query(UserTraceOrderDB).filter(UserTraceOrderDB.workshop_id == workshop_id).delete(synchronize_session=False)
+    
+    # Delete all traces
+    deleted_count = self.db.query(TraceDB).filter(TraceDB.workshop_id == workshop_id).delete(synchronize_session=False)
+    
+    # Reset workshop to intake phase
+    workshop = self.db.query(WorkshopDB).filter(WorkshopDB.id == workshop_id).first()
+    if workshop:
+      workshop.current_phase = WorkshopPhase.INTAKE
+      workshop.completed_phases = []
+      workshop.discovery_started = False
+      workshop.annotation_started = False
+      workshop.active_discovery_trace_ids = None
+      workshop.active_annotation_trace_ids = None
+    
+    self.db.commit()
+    return deleted_count
+
+  def reset_workshop_to_discovery(self, workshop_id: str) -> Optional[Workshop]:
+    """Reset a workshop back to the discovery start page (before discovery was started).
+    
+    This allows changing the discovery configuration (e.g., number of traces).
+    The phase stays as DISCOVERY but discovery_started is set to False,
+    which causes the UI to show the Discovery Start Page.
+    
+    Returns the updated workshop or None if not found.
+    """
+    workshop = self.db.query(WorkshopDB).filter(WorkshopDB.id == workshop_id).first()
+    if not workshop:
+      return None
+    
+    # Keep phase as DISCOVERY but mark discovery as NOT started
+    # This causes the UI to show the Discovery Start Page
+    workshop.current_phase = WorkshopPhase.DISCOVERY
+    workshop.discovery_started = False
+    
+    # Keep completed phases up to intake (discovery not yet complete)
+    completed = workshop.completed_phases or []
+    workshop.completed_phases = [p for p in completed if p in ['intake']]
+    
+    # Clear active discovery trace list so new selection can be made
+    workshop.active_discovery_trace_ids = None
+    
+    self.db.commit()
+    self.db.refresh(workshop)
+    
+    return Workshop(
+      id=workshop.id,
+      name=workshop.name,
+      description=workshop.description,
+      facilitator_id=workshop.facilitator_id,
+      status=workshop.status,
+      current_phase=workshop.current_phase,
+      completed_phases=workshop.completed_phases or [],
+      discovery_started=workshop.discovery_started or False,
+      annotation_started=workshop.annotation_started or False,
+      active_discovery_trace_ids=workshop.active_discovery_trace_ids or [],
+      active_annotation_trace_ids=workshop.active_annotation_trace_ids or [],
+      created_at=workshop.created_at,
+    )

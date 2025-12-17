@@ -207,19 +207,29 @@ export function WorkshopDemoLanding() {
     }
   }, [workshopError, workshopId, user?.role, isAutoRecovering]);
   
-  // Track previous phase to detect actual phase changes
+  // Track previous phase and user to detect actual changes
   const previousPhaseRef = React.useRef<string | null>(null);
+  const previousUserIdRef = React.useRef<string | null>(null);
+  const previousUserRoleRef = React.useRef<string | null>(null);
   
   // Effect: Initialize currentView after data loads
   // Skip if user has manually navigated (facilitator navigating sidebar)
   React.useEffect(() => {
     if (user && workshop && user.role) {
+      // Detect user/role changes - force recalculation when user switches
+      const isUserChange = previousUserIdRef.current !== null && previousUserIdRef.current !== user.id;
+      const isRoleChange = previousUserRoleRef.current !== null && previousUserRoleRef.current !== user.role;
+      
       // For facilitators, only auto-update view on actual phase changes, not on every workshop data update
       const isPhaseChange = previousPhaseRef.current !== null && previousPhaseRef.current !== currentPhase;
       const isInitialLoad = currentView === 'loading';
       
-      // Skip auto-update if facilitator has manually navigated and this isn't a phase change or initial load
-      if (user.role === 'facilitator' && !isInitialLoad && !isPhaseChange) {
+      // Update refs for next comparison
+      previousUserIdRef.current = user.id;
+      previousUserRoleRef.current = user.role;
+      
+      // Skip auto-update if facilitator has manually navigated and this isn't a phase/user/role change or initial load
+      if (user.role === 'facilitator' && !isInitialLoad && !isPhaseChange && !isUserChange && !isRoleChange) {
         previousPhaseRef.current = currentPhase;
         return;
       }
