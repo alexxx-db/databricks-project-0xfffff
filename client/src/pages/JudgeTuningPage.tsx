@@ -366,20 +366,20 @@ export function JudgeTuningPage() {
     if (judgeType === 'binary') {
       return `You are an expert evaluator. Please evaluate the following response based on this criteria: "${firstQuestion}"
 
-Make a binary judgment: does the response PASS or FAIL this criteria?
+Make a binary judgment: does the response meet this criteria?
 
-- PASS: The response meets the criteria
-- FAIL: The response does not meet the criteria
+- TRUE: The response meets the criteria
+- FALSE: The response does not meet the criteria
 
 Input: {input}
 Output: {output}
 
 Think step by step about whether the output meets the criteria, then provide your judgment.
 
-Your response MUST start with either "PASS" or "FAIL" on its own line, followed by your reasoning.
+Your response MUST return a boolean value: TRUE or FALSE. Do NOT use PASS/FAIL or numeric ratings. Return TRUE if the response meets the criteria, FALSE if it does not.
 
 Example format:
-PASS
+TRUE
 The response meets the criteria because...`;
     }
     
@@ -1163,6 +1163,16 @@ The response partially meets the criteria because...`;
                 />
               </div>
               
+              {/* Warning for binary judges using PASS/FAIL */}
+              {rubric?.judge_type === 'binary' && currentPrompt && 
+                (currentPrompt.toLowerCase().includes('pass') || currentPrompt.toLowerCase().includes('fail')) &&
+                !currentPrompt.toLowerCase().includes('true') && !currentPrompt.toLowerCase().includes('false') && (
+                  <div className="text-xs text-orange-700 bg-orange-50 px-3 py-2 rounded border border-orange-200">
+                    <strong>⚠️ Recommendation:</strong> For binary judges, use <strong>TRUE/FALSE</strong> instead of PASS/FAIL to align with MLflow's <code>feedback_value_type=bool</code>. 
+                    This helps ensure MLflow returns boolean values correctly. Consider updating your prompt to use TRUE/FALSE.
+                  </div>
+                )}
+              
               <div className="space-y-3">
                 <div className="flex gap-2">
                   {/* Save to Database */}
@@ -1286,7 +1296,17 @@ The response partially meets the criteria because...`;
                     <span className="text-sm text-gray-500">Total</span>
                     <div className="text-xl font-bold text-blue-600">
                       {metrics.total_evaluations}
+                      {(metrics as any).total_evaluations_all && (metrics as any).total_evaluations_all > metrics.total_evaluations && (
+                        <span className="text-xs text-gray-400 ml-1">
+                          / {(metrics as any).total_evaluations_all}
+                        </span>
+                      )}
                     </div>
+                    {(metrics as any).total_evaluations_all && (metrics as any).total_evaluations_all > metrics.total_evaluations && (
+                      <div className="text-xs text-amber-600 mt-1">
+                        {(metrics as any).total_evaluations_all - metrics.total_evaluations} missing ratings
+                      </div>
+                    )}
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
@@ -1310,6 +1330,15 @@ The response partially meets the criteria because...`;
                 <div className="mt-3 text-xs text-amber-700 bg-amber-50 px-3 py-2 rounded">
                   <strong>Note:</strong> Cohen's kappa with fewer than 3 evaluations shows simple agreement rate instead of statistical kappa. 
                   Get more annotation data for reliable inter-rater agreement metrics.
+                </div>
+              )}
+              
+              {/* Missing ratings warning */}
+              {(metrics as any).total_evaluations_all && (metrics as any).total_evaluations_all > metrics.total_evaluations && (
+                <div className="mt-3 text-xs text-orange-700 bg-orange-50 px-3 py-2 rounded">
+                  <strong>Warning:</strong> {(metrics as any).total_evaluations_all - metrics.total_evaluations} out of {(metrics as any).total_evaluations_all} evaluations have missing or invalid judge ratings. 
+                  These may have been rejected due to invalid responses (e.g., MLflow returning 3.0 for binary judges). 
+                  Only evaluations with both valid human and judge ratings are included in the metrics.
                 </div>
               )}
             </div>
@@ -1431,7 +1460,8 @@ The response partially meets the criteria because...`;
                           const judgeRating = evaluation?.predicted_rating;
                           
                           // Calculate diff and match if both ratings exist
-                          const diff = humanRating && judgeRating ? Math.abs(judgeRating - humanRating) : null;
+                          // Note: Check for !== null (not just truthy) to handle 0 values correctly
+                          const diff = humanRating !== null && judgeRating !== null && judgeRating !== undefined ? Math.abs(judgeRating - humanRating) : null;
                           const isMatch = diff === 0;
                           const isExpanded = expandedRowId === trace.id;
                           
@@ -1454,7 +1484,7 @@ The response partially meets the criteria because...`;
                                 </div>
                               </td>
                               <td className="text-center p-3">
-                                {humanRating ? (
+                                {humanRating !== null && humanRating !== undefined ? (
                                   <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-blue-100 text-blue-800 font-semibold">
                                     {humanRating}
                                   </span>
@@ -1465,11 +1495,11 @@ The response partially meets the criteria because...`;
                                 )}
                               </td>
                               <td className="text-center p-3">
-                                {judgeRating ? (
+                                {judgeRating !== null && judgeRating !== undefined ? (
                                   <span className={`inline-flex items-center justify-center w-8 h-8 rounded-full font-semibold ${
                                     diff === 0 ? 'bg-green-100 text-green-800' :
                                     diff === 1 ? 'bg-yellow-100 text-yellow-800' :
-                                    diff && diff > 1 ? 'bg-red-100 text-red-800' :
+                                    diff !== null && diff > 1 ? 'bg-red-100 text-red-800' :
                                     'bg-gray-100 text-gray-800'
                                   }`}>
                                     {judgeRating}

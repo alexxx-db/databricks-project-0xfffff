@@ -78,13 +78,20 @@ export function AnnotationDemo() {
   const [comment, setComment] = useState<string>('');
   const [submittedAnnotations, setSubmittedAnnotations] = useState<Set<string>>(new Set());
   const [hasNavigatedManually, setHasNavigatedManually] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isNavigating, setIsNavigating] = useState(false);
   const [showTableView, setShowTableView] = useState(false);
   const previousTraceId = useRef<string | null>(null);
   
-  // Track original annotation values to detect changes
-  const [originalRatings, setOriginalRatings] = useState<Record<string, number>>({});
-  const [originalFreeformResponses, setOriginalFreeformResponses] = useState<Record<string, string>>({});
-  const [originalComment, setOriginalComment] = useState<string>('');
+  // Track saved state per trace (better than global state)
+  interface SavedAnnotationState {
+    ratings: Record<string, number>;
+    freeformResponses: Record<string, string>;
+    comment: string;
+  }
+  const savedStateRef = useRef<Map<string, SavedAnnotationState>>(new Map());
+  const savingTracesRef = useRef<Set<string>>(new Set()); // Track which traces are currently saving
+  const isSavingRef = useRef(false); // Track if any user-initiated save is in progress
   
   // Get current user and permissions
   const { user } = useUser();
@@ -126,11 +133,12 @@ export function AnnotationDemo() {
   const rubricQuestions = rubric ? parseRubricQuestions(rubric) : [];
 
   // Helper function to get legacy rating (first likert rating between 1-5, or default to 3)
-  const getLegacyRating = (): number => {
+  const getLegacyRating = (ratingsOverride?: Record<string, number>): number => {
+    const ratings = ratingsOverride || currentRatings;
     // Find the first likert question and get its rating
     for (const question of rubricQuestions) {
       if (question.judgeType === 'likert') {
-        const rating = currentRatings[question.id];
+        const rating = ratings[question.id];
         if (typeof rating === 'number' && rating >= 1 && rating <= 5) {
           return rating;
         }
@@ -141,9 +149,10 @@ export function AnnotationDemo() {
   };
   
   // Helper function to get only numeric ratings for the ratings field
-  const getNumericRatings = (): Record<string, number> => {
+  const getNumericRatings = (ratingsOverride?: Record<string, number>): Record<string, number> => {
+    const ratings = ratingsOverride || currentRatings;
     const numericRatings: Record<string, number> = {};
-    for (const [key, value] of Object.entries(currentRatings)) {
+    for (const [key, value] of Object.entries(ratings)) {
       if (typeof value === 'number') {
         numericRatings[key] = value;
       }
@@ -153,11 +162,16 @@ export function AnnotationDemo() {
   
   // Helper function to build combined comment with freeform responses
   // Uses JSON for freeform to preserve multi-line content
-  const buildCombinedComment = () => {
-    let combined = comment.trim();
+  const buildCombinedComment = (
+    commentOverride?: string,
+    freeformOverride?: Record<string, string>
+  ) => {
+    const commentToUse = commentOverride !== undefined ? commentOverride : comment;
+    const freeformToUse = freeformOverride || freeformResponses;
+    let combined = commentToUse.trim();
     
     // Add freeform responses to comment as JSON to preserve multi-line content
-    const freeformEntries = Object.entries(freeformResponses).filter(([_, v]) => v.trim());
+    const freeformEntries = Object.entries(freeformToUse).filter(([_, v]) => v.trim());
     if (freeformEntries.length > 0) {
       // Build a map of title -> response for human readability
       const freeformMap: Record<string, string> = {};
@@ -239,45 +253,48 @@ export function AnnotationDemo() {
   };
   
   // Helper function to check if annotation values have changed
-  const hasAnnotationChanged = () => {
+  const hasAnnotationChanged = (traceId: string) => {
+    const savedState = savedStateRef.current.get(traceId);
+    if (!savedState) {
+      // No saved state means this is a new annotation
+      return Object.keys(currentRatings).length > 0;
+    }
+    
     // Check if ratings changed
     const ratingKeys = Object.keys(currentRatings);
-    const originalRatingKeys = Object.keys(originalRatings);
+    const savedRatingKeys = Object.keys(savedState.ratings);
     
-    // If there are current ratings, be lenient and allow saving
-    // The backend does upsert anyway, so it's safe to save even if unchanged
-    if (ratingKeys.length > 0 && originalRatingKeys.length === 0) {
-      // We have ratings but no original - could be new or loaded state is stale
-      // Be safe and return true to allow saving
-      return true;
-    }
-    
-    if (ratingKeys.length !== originalRatingKeys.length) {
-      return true;
-    }
-    
-    for (const key of ratingKeys) {
-      if (currentRatings[key] !== originalRatings[key]) {
-        return true;
+    // If we have ratings but saved state is missing some keys, allow saving
+    if (ratingKeys.length > 0) {
+      for (const key of ratingKeys) {
+        if (!(key in savedState.ratings) || currentRatings[key] !== savedState.ratings[key]) {
+          return true;
+        }
+      }
+      // Also check if saved state has keys that currentRatings doesn't (rating was removed)
+      for (const key of savedRatingKeys) {
+        if (!(key in currentRatings)) {
+          return true;
+        }
       }
     }
     
     // Check if freeform responses changed
     const freeformKeys = Object.keys(freeformResponses);
-    const originalFreeformKeys = Object.keys(originalFreeformResponses);
-    if (freeformKeys.length !== originalFreeformKeys.length) {
+    const savedFreeformKeys = Object.keys(savedState.freeformResponses);
+    if (freeformKeys.length !== savedFreeformKeys.length) {
       return true;
     }
     for (const key of freeformKeys) {
-      if (freeformResponses[key] !== originalFreeformResponses[key]) {
+      if (freeformResponses[key] !== savedState.freeformResponses[key]) {
         return true;
       }
     }
     
     // Check if comment changed
     const currentCommentTrimmed = comment.trim();
-    const originalCommentTrimmed = originalComment.trim();
-    if (currentCommentTrimmed !== originalCommentTrimmed) {
+    const savedCommentTrimmed = savedState.comment.trim();
+    if (currentCommentTrimmed !== savedCommentTrimmed) {
       return true;
     }
     
@@ -311,9 +328,6 @@ export function AnnotationDemo() {
       setCurrentRatings({});
       setFreeformResponses({});
       setComment('');
-      setOriginalRatings({});
-      setOriginalFreeformResponses({});
-      setOriginalComment('');
       previousTraceId.current = currentTrace.id;
       
       // Check if this trace already has an annotation from existing data
@@ -326,17 +340,39 @@ export function AnnotationDemo() {
         
         // Load existing annotation data into the form
         // Use the new 'ratings' field if available (multiple questions), otherwise fall back to legacy 'rating' field
-        let loadedRatings = {};
-        if (existingAnnotation.ratings && Object.keys(existingAnnotation.ratings).length > 0) {
+        let loadedRatings: Record<string, number> = {};
+        if (existingAnnotation.ratings && typeof existingAnnotation.ratings === 'object') {
           // New format: multiple ratings
-          
-          loadedRatings = existingAnnotation.ratings;
-        } else {
+          // Check if ratings object has any keys (including 0 values)
+          const ratingKeys = Object.keys(existingAnnotation.ratings);
+          if (ratingKeys.length > 0) {
+            // Deep copy to ensure we capture all values including 0
+            loadedRatings = { ...existingAnnotation.ratings };
+            // Explicitly check for 0 values to ensure they're included
+            for (const key of ratingKeys) {
+              const value = existingAnnotation.ratings[key];
+              if (typeof value === 'number') {
+                loadedRatings[key] = value; // Include 0 values
+              }
+            }
+          } else if (existingAnnotation.rating !== undefined && existingAnnotation.rating !== null) {
+            // Fallback: if ratings object is empty but rating field exists, use it
+            const firstQuestionId = rubricQuestions.length > 0 ? rubricQuestions[0].id : 'accuracy';
+            loadedRatings = { [firstQuestionId]: existingAnnotation.rating };
+          }
+        } else if (existingAnnotation.rating !== undefined && existingAnnotation.rating !== null) {
           // Legacy format: single rating - map it to the first question
           const firstQuestionId = rubricQuestions.length > 0 ? rubricQuestions[0].id : 'accuracy';
-          
           loadedRatings = { [firstQuestionId]: existingAnnotation.rating };
         }
+        
+        // Debug: Log what we're loading
+        console.debug('Loading annotation:', {
+          traceId: currentTrace.id,
+          loadedRatings,
+          existingAnnotationRatings: existingAnnotation.ratings,
+          existingAnnotationRating: existingAnnotation.rating
+        });
         
         // Parse comment to separate user comment from freeform responses
         const rawComment = existingAnnotation.comment || '';
@@ -345,11 +381,6 @@ export function AnnotationDemo() {
         setCurrentRatings(loadedRatings);
         setComment(userComment);
         setFreeformResponses(freeformData);
-        
-        // Store original values for comparison
-        setOriginalRatings(loadedRatings);
-        setOriginalComment(userComment);
-        setOriginalFreeformResponses(freeformData);
         
         // Mark it as submitted
         setSubmittedAnnotations(prev => {
@@ -364,12 +395,39 @@ export function AnnotationDemo() {
     }
   }, [currentTrace?.id, existingAnnotations, currentUserId]);
 
+  // Initialize saved state from all existing annotations (runs once)
+  useEffect(() => {
+    if (existingAnnotations && existingAnnotations.length > 0 && rubricQuestions.length > 0) {
+      existingAnnotations.forEach(annotation => {
+        // Use the new 'ratings' field if available, otherwise fall back to legacy 'rating' field
+        let loadedRatings: Record<string, number> = {};
+        if (annotation.ratings && Object.keys(annotation.ratings).length > 0) {
+          loadedRatings = annotation.ratings;
+        } else {
+          // Legacy format: single rating - map it to the first question
+          const firstQuestionId = rubricQuestions.length > 0 ? rubricQuestions[0].id : 'accuracy';
+          loadedRatings = { [firstQuestionId]: annotation.rating };
+        }
+        
+        // Parse comment to separate user comment from freeform responses
+        const rawComment = annotation.comment || '';
+        const { userComment: loadedComment, freeformData } = parseLoadedComment(rawComment);
+        
+        savedStateRef.current.set(annotation.trace_id, {
+          ratings: loadedRatings,
+          freeformResponses: freeformData,
+          comment: loadedComment
+        });
+      });
+    }
+  }, [existingAnnotations?.length, rubricQuestions.length]); // Only run when counts change
+
   // Navigate to first incomplete trace on initial load
   const hasInitialized = useRef(false);
   useEffect(() => {
     if (existingAnnotations && traceData.length > 0 && !hasNavigatedManually && !hasInitialized.current) {
       // Only count annotations for traces that currently exist in traceData
-      const validTraceIds = new Set(traceData.map(t => t.id));
+      const validTraceIds = new Set(traceData.map((t: any) => t.id));
       const completedTraceIds = new Set(
         existingAnnotations
           .filter(a => validTraceIds.has(a.trace_id))
@@ -383,18 +441,14 @@ export function AnnotationDemo() {
       );
       
       if (currentTraceAnnotation) {
-        
-        
         // Use the new 'ratings' field if available (multiple questions), otherwise fall back to legacy 'rating' field
-        let loadedRatings = {};
+        let loadedRatings: Record<string, number> = {};
         if (currentTraceAnnotation.ratings && Object.keys(currentTraceAnnotation.ratings).length > 0) {
           // New format: multiple ratings
-          
           loadedRatings = currentTraceAnnotation.ratings;
         } else {
           // Legacy format: single rating - map it to the first question
           const firstQuestionId = rubricQuestions.length > 0 ? rubricQuestions[0].id : 'accuracy';
-          
           loadedRatings = { [firstQuestionId]: currentTraceAnnotation.rating };
         }
         
@@ -402,18 +456,12 @@ export function AnnotationDemo() {
         const rawComment = currentTraceAnnotation.comment || '';
         const { userComment: loadedComment, freeformData } = parseLoadedComment(rawComment);
         setFreeformResponses(freeformData);
-        setOriginalFreeformResponses(freeformData);
-        
         setCurrentRatings(loadedRatings);
         setComment(loadedComment);
-        
-        // Store original values for comparison
-        setOriginalRatings(loadedRatings);
-        setOriginalComment(loadedComment);
       }
       
       // Find first incomplete trace
-      const firstIncompleteIndex = traceData.findIndex(trace => !completedTraceIds.has(trace.id));
+      const firstIncompleteIndex = traceData.findIndex((trace: any) => !completedTraceIds.has(trace.id));
       if (firstIncompleteIndex !== -1) {
         setCurrentTraceIndex(firstIncompleteIndex);
       } else if (completedTraceIds.size === traceData.length) {
@@ -428,26 +476,114 @@ export function AnnotationDemo() {
     }
   }, [existingAnnotations, traceData, hasNavigatedManually]);
 
-  const handleSubmitAnnotation = async () => {
-    if (!currentTrace || Object.keys(currentRatings).length === 0) return;
+  // Save annotation function - can be called synchronously or asynchronously
+  const saveAnnotation = async (
+    traceId?: string, 
+    isBackground: boolean = false,
+    ratingsOverride?: Record<string, number>,
+    freeformOverride?: Record<string, string>,
+    commentOverride?: string
+  ): Promise<boolean> => {
+    const targetTraceId = traceId || currentTrace?.id;
+    if (!targetTraceId) {
+      return true; // No trace, return success (nothing to save)
+    }
 
+    // Use override values if provided (for background saves), otherwise use current state
+    const ratingsToSave = ratingsOverride || currentRatings;
+    const freeformToSave = freeformOverride || freeformResponses;
+    const commentToSave = commentOverride !== undefined ? commentOverride : comment;
+
+    // Check if there are any ratings to save (including 0 values for binary Fail)
+    const hasRatings = Object.keys(ratingsToSave).length > 0;
+    if (!hasRatings) {
+      return true; // No ratings to save, return success
+    }
+
+    // Check if this trace is already being saved (prevent duplicate saves)
+    if (savingTracesRef.current.has(targetTraceId)) {
+      console.warn(`Save already in progress for trace ${targetTraceId}, skipping duplicate save`);
+      return false;
+    }
+
+    // For user-initiated saves, check if content has changed
+    if (!isBackground) {
+      // Prevent concurrent user-initiated saves
+      if (isSavingRef.current) {
+        console.warn('User-initiated save already in progress, skipping duplicate save');
+        return false;
+      }
+      
+      const hasChanges = hasAnnotationChanged(targetTraceId);
+      if (!hasChanges) {
+        console.log(`No changes detected for trace ${targetTraceId}, skipping save`);
+        return true; // No change needed, return success
+      }
+      
+      // Set saving flag for user-initiated saves
+      isSavingRef.current = true;
+      setIsSaving(true);
+    }
+    
+    // Mark this trace as being saved
+    savingTracesRef.current.add(targetTraceId);
+    
     try {
-      // Submit all ratings for multiple questions
+      // Submit all ratings for multiple questions (including 0 values)
+      const numericRatings = getNumericRatings(ratingsToSave);
       const annotationData = {
-        trace_id: currentTrace.id,
+        trace_id: targetTraceId,
         user_id: currentUserId,
-        rating: getLegacyRating(),  // Legacy field: first likert rating (1-5)
-        ratings: getNumericRatings(),  // New field: all numeric ratings
-        comment: buildCombinedComment()
+        rating: getLegacyRating(ratingsToSave),  // Legacy field: first likert rating (1-5)
+        ratings: numericRatings,  // New field: all numeric ratings (including 0 for binary Fail)
+        comment: buildCombinedComment(commentToSave, freeformToSave)
       };
+      
+      console.log('Saving annotation:', {
+        traceId: targetTraceId,
+        ratings: numericRatings,
+        isBackground
+      });
       
       await submitAnnotation.mutateAsync(annotationData);
       
-      // Mark as submitted
-      setSubmittedAnnotations(prev => new Set([...prev, currentTrace.id]));
-    } catch (error) {
+      setSubmittedAnnotations(prev => new Set([...prev, targetTraceId]));
       
+      // Update saved state for this trace AFTER successful save
+      savedStateRef.current.set(targetTraceId, {
+        ratings: { ...ratingsToSave },
+        freeformResponses: { ...freeformToSave },
+        comment: commentToSave
+      });
+      
+      console.log('Successfully saved annotation for trace:', targetTraceId);
+      return true;
+    } catch (error: any) {
+      console.error('Failed to save annotation:', error);
+      console.error('Error details:', {
+        message: error?.message,
+        response: error?.response?.data,
+        status: error?.response?.status,
+        traceId: targetTraceId,
+        isBackground
+      });
+      // Don't show toast for background saves - we'll show a different message in navigation handlers
+      if (!isBackground) {
+        toast.error('Failed to save annotation. Please try again.');
+      }
+      return false;
+    } finally {
+      // Clear saving flags
+      savingTracesRef.current.delete(targetTraceId);
+      if (!isBackground) {
+        isSavingRef.current = false;
+        setIsSaving(false);
+      }
     }
+  };
+
+  const handleSubmitAnnotation = async () => {
+    await saveAnnotation();
   };
 
   const handleRefresh = async () => {
@@ -456,114 +592,134 @@ export function AnnotationDemo() {
     }
   };
 
-  const nextTrace = async () => {
-    
+  const nextTrace = () => {
     if (!currentTrace) {
+      console.warn('nextTrace: No current trace');
+      return;
+    }
+    if (isNavigating) {
+      console.warn('nextTrace: Already navigating', { isNavigating });
+      return; // Prevent concurrent navigation
+    }
+    
+    // Check if we can navigate
+    if (currentTraceIndex >= traceData.length - 1) {
+      // On the last trace, show completion message
+      toast.success('All traces annotated! Great work.');
       return;
     }
     
-    // Auto-submit annotation if rating is provided
-    if (Object.keys(currentRatings).length > 0) {
-      try {
-        const isExistingAnnotation = submittedAnnotations.has(currentTrace.id);
-        const hasChanges = hasAnnotationChanged();
-        
-        // Only save if it's new OR if it has changes
-        if (!isExistingAnnotation || hasChanges) {
-          // Submit all ratings for multiple questions
-          const annotationData = {
-            trace_id: currentTrace.id,
-            user_id: currentUserId,
-            rating: getLegacyRating(),  // Legacy field: first likert rating (1-5)
-            ratings: getNumericRatings(),  // New field: all numeric ratings
-            comment: buildCombinedComment()
-          };
-          
-          await submitAnnotation.mutateAsync(annotationData);
-          
-          setSubmittedAnnotations(prev => new Set([...prev, currentTrace.id]));
-          
-          // Show appropriate success message
-          if (isExistingAnnotation && hasChanges) {
-            toast.success('Annotation updated!');
-          } else if (!isExistingAnnotation) {
-            toast.success('Annotation saved!');
-          }
-        }
-        // If no changes, don't show any toast
-      } catch (error) {
-        toast.error('Failed to save annotation. Please try again.');
-        return; // Don't navigate if submission failed
-      }
-    }
+    console.log('nextTrace: Starting optimistic navigation', { currentTraceIndex, nextIndex: currentTraceIndex + 1 });
+    setIsNavigating(true);
     
-    // Navigate to next trace or show completion message
-    if (currentTraceIndex < traceData.length - 1) {
-      setHasNavigatedManually(true);
-      setCurrentTraceIndex(prev => prev + 1);
-      // Reset form for next trace
-      setCurrentRatings({});
-      setFreeformResponses({});
-      setComment('');
+    // Store current trace data for background save
+    const currentTraceId = currentTrace.id;
+    const ratingsToSave = { ...currentRatings };
+    const freeformToSave = { ...freeformResponses };
+    const commentToSave = comment;
+    const hasRatings = Object.keys(ratingsToSave).length > 0;
+    
+    // Navigate immediately (optimistic)
+    const nextIndex = currentTraceIndex + 1;
+    console.log('nextTrace: Navigating to index', nextIndex);
+    
+    setHasNavigatedManually(true);
+    setCurrentTraceIndex(nextIndex);
+    // Reset form for next trace
+    setCurrentRatings({});
+    setFreeformResponses({});
+    setComment('');
+    
+    // Clear navigating flag immediately after state update
+    setIsNavigating(false);
+    
+    // Save in background (async, non-blocking)
+    if (hasRatings) {
+      console.log('nextTrace: Saving annotation in background', { traceId: currentTraceId });
+      // Save with the stored values (before form was cleared)
+      saveAnnotation(currentTraceId, true, ratingsToSave, freeformToSave, commentToSave)
+        .then((success) => {
+          if (success) {
+            console.log('nextTrace: Background save successful for trace:', currentTraceId);
+          } else {
+            console.warn('nextTrace: Background save failed (non-blocking) for trace:', currentTraceId);
+            toast.error('Failed to save previous annotation. You may need to go back and save manually.');
+          }
+        })
+        .catch((error) => {
+          console.error('nextTrace: Background save error:', error);
+          toast.error('Failed to save previous annotation. You may need to go back and save manually.');
+        });
     } else {
-      // On the last trace, show completion message
-      toast.success('All traces annotated! Great work.');
+      console.log('nextTrace: No ratings to save');
     }
   };
 
-  const prevTrace = async () => {
+  const prevTrace = () => {
     if (!currentTrace) {
+      console.warn('prevTrace: No current trace');
       return;
     }
-    // Auto-submit annotation if rating is provided
-    if (Object.keys(currentRatings).length > 0) {
-      try {
-        const isExistingAnnotation = submittedAnnotations.has(currentTrace.id);
-        const hasChanges = hasAnnotationChanged();
-        
-        // Only save if it's new OR if it has changes
-        if (!isExistingAnnotation || hasChanges) {
-          // Submit all ratings for multiple questions
-          await submitAnnotation.mutateAsync({
-            trace_id: currentTrace.id,
-            user_id: currentUserId,
-            rating: getLegacyRating(),  // Legacy field: first likert rating (1-5)
-            ratings: getNumericRatings(),  // New field: all numeric ratings
-            comment: buildCombinedComment()
-          });
-          
-          setSubmittedAnnotations(prev => new Set([...prev, currentTrace.id]));
-          
-          // Show appropriate success message
-          if (isExistingAnnotation && hasChanges) {
-            toast.success('Annotation updated!');
-          } else if (!isExistingAnnotation) {
-            toast.success('Annotation saved!');
-          }
-        }
-        // If no changes, don't show any toast
-      } catch (error) {
-        toast.error('Failed to save annotation. Please try again.');
-        return; // Don't navigate if submission failed
-      }
+    if (isNavigating) {
+      console.warn('prevTrace: Already navigating', { isNavigating });
+      return; // Prevent concurrent navigation
     }
     
-    // Navigate to previous trace
-    if (currentTraceIndex > 0) {
-      
-      setHasNavigatedManually(true);
-      setCurrentTraceIndex(prev => prev - 1);
+    // Check if we can navigate
+    if (currentTraceIndex <= 0) {
+      console.log('prevTrace: Already at first trace');
+      return;
+    }
+    
+    console.log('prevTrace: Starting optimistic navigation', { currentTraceIndex, prevIndex: currentTraceIndex - 1 });
+    setIsNavigating(true);
+    
+    // Store current trace data for background save
+    const currentTraceId = currentTrace.id;
+    const ratingsToSave = { ...currentRatings };
+    const freeformToSave = { ...freeformResponses };
+    const commentToSave = comment;
+    const hasRatings = Object.keys(ratingsToSave).length > 0;
+    
+    // Navigate immediately (optimistic)
+    const prevIndex = currentTraceIndex - 1;
+    console.log('prevTrace: Navigating to index', prevIndex);
+    
+    setHasNavigatedManually(true);
+    setCurrentTraceIndex(prevIndex);
+    
+    // Clear navigating flag immediately after state update
+    setIsNavigating(false);
+    
+    // Save in background (async, non-blocking)
+    if (hasRatings) {
+      console.log('prevTrace: Saving annotation in background', { traceId: currentTraceId });
+      // Save with the stored values (before navigation)
+      saveAnnotation(currentTraceId, true, ratingsToSave, freeformToSave, commentToSave)
+        .then((success) => {
+          if (success) {
+            console.log('prevTrace: Background save successful for trace:', currentTraceId);
+          } else {
+            console.warn('prevTrace: Background save failed (non-blocking) for trace:', currentTraceId);
+            toast.error('Failed to save previous annotation. You may need to go back and save manually.');
+          }
+        })
+        .catch((error) => {
+          console.error('prevTrace: Background save error:', error);
+          toast.error('Failed to save previous annotation. You may need to go back and save manually.');
+        });
     } else {
-      
+      console.log('prevTrace: No ratings to save');
     }
   };
 
   const completedCount = submittedAnnotations.size;
   const hasRated = Object.keys(currentRatings).length > 0;
   
-  // Next button should only be disabled if user hasn't provided any ratings
+  // Next button should only be disabled if user hasn't provided any ratings or is navigating
   // Allow navigation even if already submitted (to enable editing)
-  const isNextDisabled = !canAnnotate || Object.keys(currentRatings).length === 0;
+  // Navigation is now optimistic, so we don't block on isSaving
+  const isNextDisabled = !canAnnotate || Object.keys(currentRatings).length === 0 || isNavigating;
   
   if (tracesLoading || rubricLoading) {
     return (
@@ -773,7 +929,7 @@ export function AnnotationDemo() {
                                   }));
                                 }}
                                 className="w-4 h-4"
-                                disabled={!canAnnotate}
+                                disabled={!canAnnotate || isSaving}
                               />
                             </label>
                             <span className="text-xs text-center text-gray-700 leading-tight max-w-[80px]">
@@ -789,11 +945,11 @@ export function AnnotationDemo() {
                   {question.judgeType === 'binary' && (
                     <div className="flex justify-center gap-8">
                       <div 
-                        className={`flex flex-col items-center gap-2 ${canAnnotate ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'}`}
-                        onClick={() => canAnnotate && setCurrentRatings(prev => ({ ...prev, [question.id]: 1 }))}
+                        className={`flex flex-col items-center gap-2 ${canAnnotate && !isSaving ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'}`}
+                        onClick={() => canAnnotate && !isSaving && setCurrentRatings(prev => ({ ...prev, [question.id]: 1 }))}
                         role="button"
-                        tabIndex={canAnnotate ? 0 : -1}
-                        onKeyDown={(e) => e.key === 'Enter' && canAnnotate && setCurrentRatings(prev => ({ ...prev, [question.id]: 1 }))}
+                        tabIndex={canAnnotate && !isSaving ? 0 : -1}
+                        onKeyDown={(e) => e.key === 'Enter' && canAnnotate && !isSaving && setCurrentRatings(prev => ({ ...prev, [question.id]: 1 }))}
                       >
                         <div className={`w-16 h-16 rounded-xl border-2 flex items-center justify-center transition-all duration-200 ${
                           currentRatings[question.id] === 1
@@ -805,11 +961,11 @@ export function AnnotationDemo() {
                         <span className={`text-sm font-semibold ${currentRatings[question.id] === 1 ? 'text-emerald-700' : 'text-gray-500'}`}>Pass</span>
                       </div>
                       <div 
-                        className={`flex flex-col items-center gap-2 ${canAnnotate ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'}`}
-                        onClick={() => canAnnotate && setCurrentRatings(prev => ({ ...prev, [question.id]: 0 }))}
+                        className={`flex flex-col items-center gap-2 ${canAnnotate && !isSaving ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'}`}
+                        onClick={() => canAnnotate && !isSaving && setCurrentRatings(prev => ({ ...prev, [question.id]: 0 }))}
                         role="button"
-                        tabIndex={canAnnotate ? 0 : -1}
-                        onKeyDown={(e) => e.key === 'Enter' && canAnnotate && setCurrentRatings(prev => ({ ...prev, [question.id]: 0 }))}
+                        tabIndex={canAnnotate && !isSaving ? 0 : -1}
+                        onKeyDown={(e) => e.key === 'Enter' && canAnnotate && !isSaving && setCurrentRatings(prev => ({ ...prev, [question.id]: 0 }))}
                       >
                         <div className={`w-16 h-16 rounded-xl border-2 flex items-center justify-center transition-all duration-200 ${
                           currentRatings[question.id] === 0
@@ -831,7 +987,7 @@ export function AnnotationDemo() {
                         value={freeformResponses[question.id] || ''}
                         onChange={(e) => setFreeformResponses(prev => ({ ...prev, [question.id]: e.target.value }))}
                         className="min-h-[100px]"
-                        disabled={!canAnnotate}
+                        disabled={!canAnnotate || isSaving}
                       />
                       <p className="text-xs text-gray-500 mt-1">
                         Provide detailed written feedback for this evaluation criterion.
@@ -867,7 +1023,7 @@ export function AnnotationDemo() {
                   setComment(e.target.value);
                 }}
                 className="w-full min-h-[100px] p-2 border rounded whitespace-pre-wrap"
-                disabled={!canAnnotate}
+                disabled={!canAnnotate || isSaving}
                 style={{ whiteSpace: 'pre-wrap' }}
               />
             </div>
@@ -894,11 +1050,20 @@ export function AnnotationDemo() {
               <Button
                 variant="outline"
                 onClick={prevTrace}
-                disabled={currentTraceIndex === 0}
+                disabled={currentTraceIndex === 0 || isNavigating}
                 className="flex items-center gap-2"
               >
-                <ChevronLeft className="h-4 w-4" />
-                Previous
+                {isNavigating ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-gray-400/30 border-t-gray-600 rounded-full animate-spin" />
+                    Navigating...
+                  </>
+                ) : (
+                  <>
+                    <ChevronLeft className="h-4 w-4" />
+                    Previous
+                  </>
+                )}
               </Button>
               
               <Button
@@ -906,7 +1071,12 @@ export function AnnotationDemo() {
                 disabled={isNextDisabled}
                 className="flex items-center gap-2"
               >
-                {currentTraceIndex === traceData.length - 1 ? (
+                {isNavigating ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Navigating...
+                  </>
+                ) : currentTraceIndex === traceData.length - 1 ? (
                   <>
                     <Send className="h-4 w-4" />
                     Complete

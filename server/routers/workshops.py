@@ -140,6 +140,7 @@ from server.models import (
   JudgePerformanceMetrics,
   JudgePrompt,
   JudgePromptCreate,
+  JudgeType,
   MLflowIntakeConfig,
   MLflowIntakeConfigCreate,
   MLflowIntakeStatus,
@@ -2531,12 +2532,56 @@ async def start_simple_evaluation(
           token=databricks_token
         )
         
-        # Get rubric to determine judge type (more reliable than inferring from ratings)
+        # Get rubric to determine judge type
         rubric = thread_db_service.get_rubric(workshop_id)
-        judge_type = rubric.judge_type if rubric else 'likert'
-        is_binary_judge = judge_type == 'binary'
+        is_binary_judge = False
+        judge_type_str = 'likert'
         
-        job.add_log(f"Judge type from rubric: {judge_type} ({'Binary (Pass/Fail)' if is_binary_judge else 'Likert (1-5)'})")
+        if rubric:
+          # First, try to parse rubric questions to get per-question judge types
+          # This is more accurate than the rubric-level judge_type
+          if rubric.question:
+            # Access the private method through the instance
+            questions = thread_db_service._parse_rubric_questions(rubric.question)
+            job.add_log(f"📋 Parsed {len(questions)} questions from rubric")
+            if questions:
+              # Log question details for debugging
+              for i, q in enumerate(questions):
+                job.add_log(f"  Question {i+1}: id={q.get('id')}, judge_type={q.get('judge_type')}, title={q.get('title', '')[:50]}")
+              
+              # Check if any question is binary
+              binary_questions = [q for q in questions if q.get('judge_type') == 'binary']
+              likert_questions = [q for q in questions if q.get('judge_type') == 'likert']
+              
+              job.add_log(f"📊 Found {len(binary_questions)} binary questions and {len(likert_questions)} likert questions")
+              
+              if binary_questions and not likert_questions:
+                # All questions are binary
+                is_binary_judge = True
+                judge_type_str = 'binary'
+                job.add_log(f"✅ All questions are binary - using binary judge type")
+              elif likert_questions and not binary_questions:
+                # All questions are likert
+                is_binary_judge = False
+                judge_type_str = 'likert'
+                job.add_log(f"✅ All questions are likert - using likert judge type")
+              elif binary_questions:
+                # Mixed - but if we have binary questions, prefer binary
+                # (most common case: rubric has default likert but questions are binary)
+                is_binary_judge = True
+                judge_type_str = 'binary'
+                job.add_log(f"⚠️ Mixed judge types detected - using binary (found {len(binary_questions)} binary questions)")
+              else:
+                job.add_log(f"⚠️ No judge_type found in questions - will fall back to rubric-level judge_type")
+          
+          # Fallback to rubric-level judge_type if no questions parsed or all questions are likert
+          if judge_type_str == 'likert' and not is_binary_judge:
+            judge_type_enum = rubric.judge_type
+            judge_type_str = judge_type_enum.value if isinstance(judge_type_enum, JudgeType) else str(judge_type_enum)
+            is_binary_judge = judge_type_enum == JudgeType.BINARY
+        
+        job.add_log(f"Judge type from rubric: {judge_type_str} ({'Binary (Pass/Fail)' if is_binary_judge else 'Likert (1-5)'})")
+        job.add_log(f"🔍 Final judge type determination: is_binary_judge={is_binary_judge}, judge_type_str='{judge_type_str}'")
         
         # Get traces and annotations
         traces = thread_db_service.get_traces(workshop_id)
@@ -2585,6 +2630,26 @@ async def start_simple_evaluation(
         for ratings in trace_annotations.values():
           all_ratings.extend(ratings)
         job.add_log(f"Sample ratings: {all_ratings[:10]}{'...' if len(all_ratings) > 10 else ''}")
+        
+        # Infer judge type from actual ratings if not already determined correctly
+        # If all ratings are 0 or 1, it's binary; if we see 2-5, it's likert
+        if all_ratings:
+          unique_ratings = set(all_ratings)
+          has_zero = 0 in unique_ratings
+          has_two_to_five = bool(unique_ratings.intersection({2, 3, 4, 5}))
+          
+          if has_zero and not has_two_to_five:
+            # We have 0s and no 2-5 values, so it's binary
+            if not is_binary_judge:
+              job.add_log(f"⚠️ Judge type inferred from ratings: binary (found 0 values, no 2-5 values)")
+              is_binary_judge = True
+              judge_type_str = 'binary'
+          elif has_two_to_five:
+            # We have 2-5 values, so it's likert
+            if is_binary_judge:
+              job.add_log(f"⚠️ Judge type inferred from ratings: likert (found 2-5 values)")
+              is_binary_judge = False
+              judge_type_str = 'likert'
         
         for idx, (trace_id, ratings) in enumerate(trace_annotations.items()):
           trace = trace_map.get(trace_id)
@@ -2640,25 +2705,45 @@ async def start_simple_evaluation(
             
             predicted_rating = None
             
+            # Log which branch we're taking for debugging
+            if idx < 3:  # Log first 3 traces for debugging
+              job.add_log(f"🔍 Parsing response for trace {trace_id[:8]}... - is_binary_judge={is_binary_judge}, response preview: {response_text[:100]}")
+            
             if is_binary_judge:
-              # Binary judge: look for Pass/Fail keywords
-              pass_keywords = ['pass', 'yes', 'correct', 'meets', 'acceptable', 'approve', 'good']
-              fail_keywords = ['fail', 'no', 'incorrect', 'does not meet', 'unacceptable', 'reject', 'bad']
+              # Binary judge: look for Pass/Fail keywords FIRST (most reliable)
+              pass_keywords = ['pass', 'yes', 'correct', 'meets', 'acceptable', 'approve', 'good', 'satisfies']
+              fail_keywords = ['fail', 'no', 'incorrect', 'does not meet', 'unacceptable', 'reject', 'bad', 'does not satisfy']
               
               if any(word in response_lower for word in pass_keywords):
                 predicted_rating = 1  # Pass
+                job.add_log(f"✅ Binary judge: Found PASS keyword in response for trace {trace_id[:8]}...")
               elif any(word in response_lower for word in fail_keywords):
                 predicted_rating = 0  # Fail
+                job.add_log(f"✅ Binary judge: Found FAIL keyword in response for trace {trace_id[:8]}...")
               else:
-                # Try to extract 0 or 1
-                match = re.search(r'\b([01])\b', response_text)
+                # Try to extract ONLY 0 or 1 (strict - reject anything else)
+                # Use word boundaries to avoid matching "3" in "13" or "30"
+                match = re.search(r'\b(0|1)\b', response_text)
                 if match:
                   predicted_rating = int(match.group(1))
+                  job.add_log(f"✅ Binary judge: Extracted {predicted_rating} from response for trace {trace_id[:8]}...")
+                else:
+                  # Check if response contains any number - if it's not 0 or 1, log warning
+                  number_match = re.search(r'\b([0-9]+)\b', response_text)
+                  if number_match:
+                    found_number = int(number_match.group(1))
+                    if found_number not in [0, 1]:
+                      job.add_log(f"⚠️ Binary judge: Response contains {found_number} (not 0 or 1) for trace {trace_id[:8]}... - ignoring. Response: {response_text[:150]}")
               
-              # Default for binary
+              # Default for binary - only if we couldn't parse anything
               if predicted_rating is None:
-                job.add_log(f"Warning: Could not parse binary rating from response for trace {trace_id[:8]}... - defaulting to 1 (Pass). Response: {response_text[:100]}")
+                job.add_log(f"⚠️ Binary judge: Could not parse binary rating from response for trace {trace_id[:8]}... - defaulting to 1 (Pass). Response: {response_text[:150]}")
                 predicted_rating = 1  # Default to pass if unclear
+              
+              # Final validation: ensure predicted_rating is strictly 0 or 1
+              if predicted_rating not in [0, 1]:
+                job.add_log(f"❌ Binary judge: Invalid rating {predicted_rating} detected - forcing to 1. Response: {response_text[:150]}")
+                predicted_rating = 1
             else:
               # Likert judge: look for numeric rating 1-5
               match = re.search(r'\b([1-5])\b', response_text)
@@ -2668,6 +2753,10 @@ async def start_simple_evaluation(
               # Default for Likert
               if predicted_rating is None:
                 predicted_rating = 3  # Default to neutral if unclear
+            
+            # Log the final predicted rating for debugging (first few traces)
+            if idx < 3:
+              job.add_log(f"📊 Final predicted_rating for trace {trace_id[:8]}...: {predicted_rating} (is_binary_judge={is_binary_judge})")
             
             evaluations.append({
               'trace_id': trace_id,

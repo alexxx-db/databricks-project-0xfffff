@@ -383,10 +383,20 @@ def create_tables():
   """Create all database tables."""
   try:
     print('🔧 Creating database tables...')
-    Base.metadata.create_all(bind=engine)
+    # Use checkfirst=True to avoid errors if tables already exist
+    Base.metadata.create_all(bind=engine, checkfirst=True)
     print('✅ Database tables created successfully')
+  except Exception as e:
+    # Handle case where tables already exist (common in production)
+    error_msg = str(e).lower()
+    if 'already exists' in error_msg or 'table' in error_msg and 'exists' in error_msg:
+      print('ℹ️ Some tables already exist, continuing with schema updates...')
+    else:
+      print(f'❌ Error creating database tables: {e}')
+      raise e
 
-    # Update schema for existing databases
+  # Update schema for existing databases
+  try:
     from sqlalchemy import text
 
     with engine.connect() as conn:
@@ -423,10 +433,10 @@ def create_tables():
         print('✅ Database schema updated for traces (added sme_feedback column)')
       except Exception as e:
         print(f'ℹ️ traces schema update skipped (sme_feedback column may already exist): {e}')
-
+    
   except Exception as e:
-    print(f'❌ Error creating database tables: {e}')
-    raise e
+    # Schema updates are optional, don't fail if they error
+    print(f'ℹ️ Schema update error (non-critical): {e}')
 
 
 def drop_tables():

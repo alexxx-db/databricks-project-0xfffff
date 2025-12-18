@@ -165,10 +165,10 @@ Provide your rating as a single number (1-5) followed by a brief explanation.`,
 {criteria}
 
 ## Task
-Determine if the response PASSES or FAILS the evaluation criteria.
+Determine if the response meets the evaluation criteria.
 
-- PASS: The response meets the required criteria
-- FAIL: The response does not meet the required criteria
+- TRUE: The response meets the required criteria
+- FALSE: The response does not meet the required criteria
 
 ## Input
 {input}
@@ -176,7 +176,7 @@ Determine if the response PASSES or FAILS the evaluation criteria.
 ## Output to Evaluate
 {output}
 
-Respond with either "PASS" or "FAIL" followed by a brief explanation.`,
+You must return a boolean value: TRUE or FALSE. Do NOT use PASS/FAIL or numeric ratings. Return TRUE if the response meets the criteria, FALSE if it does not.`,
 
   freeform: `You are an expert evaluator providing detailed feedback on an AI assistant's response.
 

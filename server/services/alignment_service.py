@@ -13,7 +13,6 @@ import time
 from collections import Counter
 from statistics import mean
 from typing import Any, Callable, Dict, Generator, List, Optional
-
 from sklearn.metrics import accuracy_score, cohen_kappa_score, confusion_matrix
 
 import pandas as pd
@@ -189,12 +188,48 @@ def binary_agreement_metric(example: Any, prediction: Any) -> float:
 def get_judge_type_from_rubric(db_service: DatabaseService, workshop_id: str) -> str:
     """Get the judge type from the workshop's rubric.
     
+    First checks individual question judge types (more accurate), then falls back to rubric-level judge_type.
     Returns 'likert', 'binary', or 'freeform'. Defaults to 'likert' if not set.
     """
     try:
+        from server.models import JudgeType
         rubric = db_service.get_rubric(workshop_id)
-        if rubric and hasattr(rubric, 'judge_type') and rubric.judge_type:
-            return rubric.judge_type
+        if not rubric:
+            return 'likert'  # Default
+        
+        # First, try to parse rubric questions to get per-question judge types
+        # This is more accurate than the rubric-level judge_type
+        if rubric.question:
+            try:
+                questions = db_service._parse_rubric_questions(rubric.question)
+                if questions:
+                    # Check if any question is binary
+                    binary_questions = [q for q in questions if q.get('judge_type') == 'binary']
+                    likert_questions = [q for q in questions if q.get('judge_type') == 'likert']
+                    
+                    if binary_questions and not likert_questions:
+                        # All questions are binary
+                        logger.info(f"Detected binary judge type from rubric questions ({len(binary_questions)} binary questions)")
+                        return 'binary'
+                    elif likert_questions and not binary_questions:
+                        # All questions are likert
+                        logger.info(f"Detected likert judge type from rubric questions ({len(likert_questions)} likert questions)")
+                        return 'likert'
+                    elif binary_questions:
+                        # Mixed - but if we have binary questions, prefer binary
+                        # (most common case: rubric has default likert but questions are binary)
+                        logger.info(f"Detected binary judge type from rubric questions (mixed types, {len(binary_questions)} binary questions)")
+                        return 'binary'
+            except Exception as parse_error:
+                logger.warning(f"Could not parse rubric questions for judge type detection: {parse_error}")
+        
+        # Fallback to rubric-level judge_type if no questions parsed or all questions are likert
+        if hasattr(rubric, 'judge_type') and rubric.judge_type:
+            # Handle JudgeType enum - extract string value
+            judge_type = rubric.judge_type
+            if isinstance(judge_type, JudgeType):
+                return judge_type.value
+            return str(judge_type)
     except Exception as e:
         logger.warning("Could not get rubric judge_type for workshop %s: %s", workshop_id, e)
     return 'likert'  # Default
@@ -470,12 +505,24 @@ class AlignmentService:
             evaluations: List of evaluation dictionaries with human_rating and predicted_rating
             judge_type: 'likert' for 1-5 scale, 'binary' for pass/fail
         """
+        # Count total evaluations and valid pairs
+        total_evaluations = len(evaluations)
         valid_pairs = [
             (e.get('human_rating'), e.get('predicted_rating'))
             for e in evaluations
             if isinstance(e.get('human_rating'), (int, float)) and isinstance(e.get('predicted_rating'), (int, float))
         ]
         total = len(valid_pairs)
+        
+        # Log if there's a discrepancy
+        if total_evaluations > total:
+            missing_count = total_evaluations - total
+            logger.warning(
+                "Metrics calculation: %d evaluations have missing or invalid ratings (total=%d, valid=%d)",
+                missing_count,
+                total_evaluations,
+                total,
+            )
         
         # Handle binary judges differently
         if judge_type == 'binary':
@@ -490,6 +537,7 @@ class AlignmentService:
                     'agreement_by_rating': default_agreement,
                     'confusion_matrix': default_matrix,
                     'total_evaluations': 0,
+                    'total_evaluations_all': total_evaluations,
                     'judge_type': 'binary',
                 }
             
@@ -500,12 +548,23 @@ class AlignmentService:
             matches = sum(1 for h, p in zip(humans, preds, strict=False) if h == p)
             simple_agreement = matches / total if total else 0.0
             
-            try:
-                kappa = cohen_kappa_score(humans, preds)
-            except Exception:
+            # Check if there's any variation in the data
+            unique_humans = set(humans)
+            unique_preds = set(preds)
+            
+            # If all values are the same and they match, that's perfect agreement (kappa = 1.0)
+            if len(unique_humans) == 1 and len(unique_preds) == 1 and humans == preds:
+                kappa = 1.0  # Perfect agreement when all values are the same and match
+            elif len(unique_humans) == 1 or len(unique_preds) == 1:
+                # No variation in one set - can't calculate meaningful kappa, use simple agreement
                 kappa = simple_agreement
-            if math.isnan(kappa):
-                kappa = simple_agreement
+            else:
+                try:
+                    kappa = cohen_kappa_score(humans, preds)
+                except Exception:
+                    kappa = simple_agreement
+                if math.isnan(kappa):
+                    kappa = simple_agreement
             
             try:
                 accuracy = accuracy_score(humans, preds)
@@ -540,7 +599,8 @@ class AlignmentService:
                 'mean_absolute_error': 0.0,  # Not meaningful for binary
                 'agreement_by_rating': agreement_by_rating,
                 'confusion_matrix': cm,
-                'total_evaluations': total,
+                'total_evaluations': total,  # Valid evaluations (both human and predicted ratings available)
+                'total_evaluations_all': total_evaluations,  # All evaluations including those with missing ratings
                 'judge_type': 'binary',
             }
         
@@ -556,6 +616,7 @@ class AlignmentService:
                 'agreement_by_rating': default_agreement,
                 'confusion_matrix': default_matrix,
                 'total_evaluations': 0,
+                'total_evaluations_all': total_evaluations,
                 'judge_type': 'likert',
             }
 
@@ -606,7 +667,8 @@ class AlignmentService:
             'mean_absolute_error': float(mean_abs_error),
             'agreement_by_rating': agreement_by_rating,
             'confusion_matrix': cm,
-            'total_evaluations': total,
+            'total_evaluations': total,  # Valid evaluations (both human and predicted ratings available)
+            'total_evaluations_all': total_evaluations,  # All evaluations including those with missing ratings
             'judge_type': 'likert',
         }
 
@@ -736,11 +798,26 @@ class AlignmentService:
             # Create the judge using mlflow.genai.judges.make_judge
             from mlflow.genai.judges import make_judge
             
+            # Get judge type from rubric FIRST to enhance prompt if needed
+            judge_type = get_judge_type_from_rubric(self.db_service, workshop_id)
+            
             # The prompt template with placeholders for judge instructions
             mlflow_prompt_template = self._normalize_judge_prompt(judge_prompt)
             
-            # Get judge type from rubric to determine feedback_value_type
-            judge_type = get_judge_type_from_rubric(self.db_service, workshop_id)
+            # For binary rubrics, enhance the prompt to explicitly require True/False boolean values
+            if judge_type == 'binary':
+                # Check if prompt already has boolean instructions
+                prompt_lower = mlflow_prompt_template.lower()
+                has_boolean_instructions = any(phrase in prompt_lower for phrase in [
+                    'true or false', 'true/false', 'return true', 'return false',
+                    'respond with true', 'respond with false', 'boolean'
+                ])
+                
+                if not has_boolean_instructions:
+                    # Append boolean instructions to ensure clear boolean response
+                    # This aligns with feedback_value_type=bool
+                    mlflow_prompt_template += "\n\nIMPORTANT: You must return a boolean value: TRUE or FALSE. Do NOT use PASS/FAIL or numeric ratings. Return TRUE if the response meets the criteria, FALSE if it does not. This is a binary evaluation that requires a boolean response."
+                    yield f"Enhanced prompt with boolean instructions for binary rubric (aligned with feedback_value_type=bool)"
             
             # Set feedback_value_type based on judge type
             # - Binary judges: use bool for Pass/Fail (True/False -> 1/0)
@@ -763,6 +840,58 @@ class AlignmentService:
             
             yield f"Created judge: {judge_name}"
             
+            # Ensure eval_df has 'inputs' and 'outputs' columns required by MLflow evaluate()
+            # MLflow's search_traces returns traces, but we need to fetch full trace data to get inputs/outputs
+            if 'inputs' not in eval_df.columns or 'outputs' not in eval_df.columns:
+                yield f"Preparing inputs/outputs columns from MLflow trace data..."
+                
+                # Fetch full trace data for each trace_id to extract inputs/outputs
+                eval_df = eval_df.copy()
+                inputs_list = []
+                outputs_list = []
+                
+                for trace_id in eval_df['trace_id']:
+                    try:
+                        full_trace = mlflow.get_trace(trace_id)
+                        # Extract inputs/outputs from trace data structure
+                        # MLflow traces have data.request and data.response
+                        trace_inputs = None
+                        trace_outputs = None
+                        
+                        if hasattr(full_trace, 'data'):
+                            if hasattr(full_trace.data, 'request'):
+                                trace_inputs = full_trace.data.request
+                            if hasattr(full_trace.data, 'response'):
+                                trace_outputs = full_trace.data.response
+                        
+                        inputs_list.append(trace_inputs)
+                        outputs_list.append(trace_outputs)
+                    except Exception as e:
+                        yield f"WARNING: Could not fetch trace {trace_id[:8]}...: {e}"
+                        inputs_list.append(None)
+                        outputs_list.append(None)
+                
+                # Add inputs and outputs columns
+                if 'inputs' not in eval_df.columns:
+                    eval_df['inputs'] = inputs_list
+                if 'outputs' not in eval_df.columns:
+                    eval_df['outputs'] = outputs_list
+                
+                # Check if we successfully created the columns
+                missing_inputs = eval_df['inputs'].isna().sum() if 'inputs' in eval_df.columns else len(eval_df)
+                missing_outputs = eval_df['outputs'].isna().sum() if 'outputs' in eval_df.columns else len(eval_df)
+                
+                if missing_inputs > 0 or missing_outputs > 0:
+                    yield f"WARNING: Missing inputs for {missing_inputs} traces, missing outputs for {missing_outputs} traces"
+                    # Filter out rows with missing inputs or outputs
+                    before_count = len(eval_df)
+                    eval_df = eval_df[eval_df['inputs'].notna() & eval_df['outputs'].notna()]
+                    after_count = len(eval_df)
+                    if before_count != after_count:
+                        yield f"Filtered out {before_count - after_count} traces with missing inputs/outputs"
+                else:
+                    yield f"✅ Successfully prepared inputs/outputs columns for {len(eval_df)} traces"
+            
             # Run evaluation using the judge as a scorer
             yield "Running mlflow.genai.evaluate()..."
             
@@ -779,13 +908,33 @@ class AlignmentService:
             
             if result_df is not None:
                 columns_list = list(result_df.columns)
+                yield f"Available columns in result_df: {columns_list}"
+                
                 # Look for the judge's value column: {judge_name}/value
                 expected_value_col = f"{judge_name}/value"
                 
                 if expected_value_col in result_df.columns:
                     judge_value_col = expected_value_col
                 
+                # Also look for reasoning/explanation/output columns that might contain the raw text response
+                reasoning_col = None
+                possible_reasoning_cols = [
+                    f"{judge_name}/explanation",
+                    f"{judge_name}/reasoning",
+                    f"{judge_name}/output",
+                    f"{judge_name}/text",
+                    f"{judge_name}/response",
+                ]
+                for col_name in possible_reasoning_cols:
+                    if col_name in result_df.columns:
+                        reasoning_col = col_name
+                        break
+                
                 yield f"Looking for column '{expected_value_col}': {'found' if judge_value_col else 'NOT FOUND'}"
+                if reasoning_col:
+                    yield f"Found reasoning column: {reasoning_col}"
+                else:
+                    yield f"WARNING: No reasoning/explanation column found. Available columns: {columns_list}"
                 
                 if judge_value_col:
                     null_prediction_rows = 0
@@ -795,8 +944,9 @@ class AlignmentService:
                     # Get judge type early to properly convert PASS/FAIL for binary rubrics
                     early_judge_type = get_judge_type_from_rubric(self.db_service, workshop_id)
                     is_binary = early_judge_type == 'binary'
+                    yield f"🔍 Judge type detection: judge_type='{early_judge_type}', is_binary={is_binary}"
                     if is_binary:
-                        yield f"Detected binary rubric - will convert PASS/FAIL to 1/0"
+                        yield f"Detected binary rubric - will convert PASS/FAIL to 1/0 and reject any values not 0 or 1"
                     
                     for idx, (_, row) in enumerate(result_df.iterrows()):
                         raw_trace_id = row.get('trace_id')
@@ -812,36 +962,126 @@ class AlignmentService:
                         workshop_uuid = trace_data.get('workshop_id')
                         
                         predicted_value = row.get(judge_value_col)
+                        print(f"predicted_value: {predicted_value}")
+                        # Also try to get raw text response from reasoning column if available
+                        raw_text_response = None
+                        if reasoning_col and reasoning_col in result_df.columns:
+                            raw_text_response = row.get(reasoning_col)
+                        
                         predicted_rating = None
-                        if predicted_value is not None and not pd.isna(predicted_value):
+                        
+                        # Log raw value for debugging (first few traces or when we have issues)
+                        should_log = idx < 3 or (is_binary and predicted_value is not None and not pd.isna(predicted_value) and not isinstance(predicted_value, bool))
+                        if should_log and is_binary:
+                            yield f"🔍 Raw MLflow response for trace {trace_id[:8]}...: type={type(predicted_value)}, value={predicted_value}"
+                            if raw_text_response:
+                                yield f"🔍 Raw text response: {str(raw_text_response)[:300]}"
+                            else:
+                                yield f"⚠️ No raw text response available for trace {trace_id[:8]}..."
+                        
+                        # For binary judges, prioritize parsing raw text response FIRST
+                        # This is critical because MLflow incorrectly parses responses as 3.0 (float) instead of bool
+                        # even when feedback_value_type=bool. We now ask for True/False to align with bool type.
+                        if is_binary and raw_text_response:
+                            text_lower = str(raw_text_response).lower()
+                            # Prioritize True/False boolean values (aligned with feedback_value_type=bool)
+                            # Check for explicit True/False first
+                            if 'true' in text_lower and 'false' not in text_lower[:text_lower.find('true')+10]:
+                                # Found "true" and "false" doesn't appear before it
+                                predicted_rating = 1.0
+                                if should_log:
+                                    yield f"✅ Binary judge: Parsed TRUE from text response for trace {trace_id[:8]}... - using 1.0 (MLflow parsed as: {predicted_value}, type: {type(predicted_value).__name__})"
+                            elif 'false' in text_lower and 'true' not in text_lower[:text_lower.find('false')+10]:
+                                # Found "false" and "true" doesn't appear before it
+                                predicted_rating = 0.0
+                                if should_log:
+                                    yield f"✅ Binary judge: Parsed FALSE from text response for trace {trace_id[:8]}... - using 0.0 (MLflow parsed as: {predicted_value}, type: {type(predicted_value).__name__})"
+                            else:
+                                # Fallback to other keywords (PASS/FAIL, etc.)
+                                pass_keywords = ['pass', 'yes', 'correct', 'meets', 'acceptable', 'satisfies', 'satisfactory']
+                                fail_keywords = ['fail', 'no', 'incorrect', 'does not meet', 'unacceptable', 'does not satisfy', 'unsatisfactory']
+                                
+                                if any(word in text_lower for word in pass_keywords):
+                                    predicted_rating = 1.0
+                                    if should_log:
+                                        yield f"✅ Binary judge: Parsed PASS/positive from text response for trace {trace_id[:8]}... - using 1.0 (MLflow parsed as: {predicted_value}, type: {type(predicted_value).__name__})"
+                                elif any(word in text_lower for word in fail_keywords):
+                                    predicted_rating = 0.0
+                                    if should_log:
+                                        yield f"✅ Binary judge: Parsed FAIL/negative from text response for trace {trace_id[:8]}... - using 0.0 (MLflow parsed as: {predicted_value}, type: {type(predicted_value).__name__})"
+                        
+                        # If we didn't parse from text, fall back to the parsed value
+                        if predicted_rating is None and predicted_value is not None and not pd.isna(predicted_value):
                             # Handle boolean values directly (from binary judges with feedback_value_type=bool)
                             if isinstance(predicted_value, bool):
                                 predicted_rating = 1.0 if predicted_value else 0.0
+                                if should_log:
+                                    yield f"✅ Binary judge returned boolean: {predicted_value} -> {predicted_rating}"
+                            elif is_binary and isinstance(predicted_value, (int, float)):
+                                # MLflow incorrectly returned numeric instead of bool for binary judge
+                                if should_log:
+                                    yield f"⚠️ WARNING: Binary judge with feedback_value_type=bool returned {type(predicted_value).__name__} ({predicted_value}) instead of bool. Will try to parse from text response."
                             else:
-                                # Try to convert PASS/FAIL strings to 1/0 for binary rubrics
+                                # Try to convert True/False or PASS/FAIL strings to 1/0 for binary rubrics
+                                # Prioritize True/False (aligned with feedback_value_type=bool)
                                 str_value = str(predicted_value).strip().upper()
-                                if str_value in ('PASS', 'YES', 'TRUE', 'CORRECT', 'GOOD', 'ACCEPTABLE', '1'):
+                                if str_value in ('TRUE', 'TRUE.', 'TRUE!', 'TRUE:', 'TRUE;'):
                                     predicted_rating = 1.0
-                                elif str_value in ('FAIL', 'NO', 'FALSE', 'INCORRECT', 'BAD', 'UNACCEPTABLE', '0'):
+                                    if should_log:
+                                        yield f"✅ Converted string '{str_value}' to 1.0 (TRUE)"
+                                elif str_value in ('FALSE', 'FALSE.', 'FALSE!', 'FALSE:', 'FALSE;'):
                                     predicted_rating = 0.0
+                                    if should_log:
+                                        yield f"✅ Converted string '{str_value}' to 0.0 (FALSE)"
+                                elif str_value in ('PASS', 'YES', 'CORRECT', 'GOOD', 'ACCEPTABLE', '1', '1.0'):
+                                    predicted_rating = 1.0
+                                    if should_log:
+                                        yield f"✅ Converted string '{str_value}' to 1.0 (PASS/positive)"
+                                elif str_value in ('FAIL', 'NO', 'INCORRECT', 'BAD', 'UNACCEPTABLE', '0', '0.0'):
+                                    predicted_rating = 0.0
+                                    if should_log:
+                                        yield f"✅ Converted string '{str_value}' to 0.0 (FAIL/negative)"
                                 else:
                                     # Try numeric conversion
                                     try:
                                         numeric_value = float(predicted_value)
                                         # Validate and normalize for binary rubrics
                                         if is_binary:
-                                            if numeric_value == 0:
+                                            # Strict validation: only 0 or 1 are valid for binary
+                                            if numeric_value == 0 or numeric_value == 0.0:
                                                 predicted_rating = 0.0
-                                            elif numeric_value == 1:
+                                                if should_log:
+                                                    yield f"✅ Converted numeric {numeric_value} to 0.0 (FAIL)"
+                                            elif numeric_value == 1 or numeric_value == 1.0:
                                                 predicted_rating = 1.0
+                                                if should_log:
+                                                    yield f"✅ Converted numeric {numeric_value} to 1.0 (PASS)"
                                             else:
-                                                # Invalid binary value - normalize to 0 or 1
-                                                # Any non-zero becomes 1, but log a warning
-                                                predicted_rating = 1.0 if numeric_value != 0 else 0.0
-                                                yield f"WARNING: Invalid binary rating {numeric_value} for trace {trace_id[:8]}... - normalized to {predicted_rating}"
+                                                # Invalid binary value - try to parse from raw text response if available
+                                                if raw_text_response:
+                                                    text_lower = str(raw_text_response).lower()
+                                                    # Look for PASS/FAIL keywords in the text response
+                                                    if any(word in text_lower for word in ['pass', 'yes', 'correct', 'meets', 'acceptable', 'true']):
+                                                        predicted_rating = 1.0
+                                                        yield f"⚠️ MLflow returned {numeric_value} but parsed PASS from text response for trace {trace_id[:8]}... - using 1.0"
+                                                    elif any(word in text_lower for word in ['fail', 'no', 'incorrect', 'does not meet', 'unacceptable', 'false']):
+                                                        predicted_rating = 0.0
+                                                        yield f"⚠️ MLflow returned {numeric_value} but parsed FAIL from text response for trace {trace_id[:8]}... - using 0.0"
+                                                    else:
+                                                        # Still invalid - reject it (we already tried parsing from text above)
+                                                        predicted_rating = None
+                                                        yield f"ERROR: Invalid binary rating {numeric_value} (type: {type(predicted_value).__name__}) for trace {trace_id[:8]}... - must be 0 or 1, rejecting evaluation. MLflow incorrectly parsed as: {str(predicted_value)[:100]}, Raw text response: {str(raw_text_response)[:300]}. MLflow's feedback_value_type=bool is not working correctly - it's returning float instead of bool."
+                                                else:
+                                                    # No raw text available - reject it
+                                                    predicted_rating = None
+                                                    yield f"ERROR: Invalid binary rating {numeric_value} (type: {type(predicted_value).__name__}) for trace {trace_id[:8]}... - must be 0 or 1, rejecting evaluation. MLflow incorrectly parsed as: {str(predicted_value)[:100]}. No raw text response available to parse. MLflow's feedback_value_type=bool is not working correctly - it's returning float instead of bool."
                                         else:
                                             # Likert scale: allow 1-5, clamp if out of range
-                                            if 1 <= numeric_value <= 5:
+                                            # But double-check: if we see 0, might be misclassified binary
+                                            if numeric_value == 0:
+                                                yield f"WARNING: Likert judge returned 0 for trace {trace_id[:8]}... - this might be a binary rubric misclassified as likert"
+                                                predicted_rating = None  # Reject 0 for Likert
+                                            elif 1 <= numeric_value <= 5:
                                                 predicted_rating = numeric_value
                                             else:
                                                 predicted_rating = max(1.0, min(5.0, numeric_value))

@@ -35,6 +35,7 @@ from server.models import (
   JudgeEvaluation,
   JudgePrompt,
   JudgePromptCreate,
+  JudgeType,
   MLflowIntakeConfig,
   MLflowIntakeStatus,
   Rubric,
@@ -839,24 +840,92 @@ class DatabaseService:
   # Annotation operations
   def add_annotation(self, workshop_id: str, annotation_data: AnnotationCreate) -> Annotation:
     """Add an annotation. If a duplicate exists, update the existing one."""
+    logger.info(f"📝 add_annotation called: trace_id={annotation_data.trace_id}, user_id={annotation_data.user_id}, rating={annotation_data.rating}, ratings={annotation_data.ratings}")
+    
     # Get rubric to determine judge type for validation
     rubric = self.get_rubric(workshop_id)
-    judge_type = rubric.judge_type if rubric else 'likert'
+    default_judge_type = rubric.judge_type if rubric else 'likert'
+    logger.info(f"🔍 Default judge type: {default_judge_type}")
+    
+    # Parse rubric questions to get per-question judge types
+    # Frontend uses format: {rubric_id}_{index} (e.g., "1daa749b-d147-45e3-a667-fa3eca40269b_0")
+    # Backend parses as: q_1, q_2, etc.
+    # We need to match by index, not by ID
+    question_judge_types_by_id = {}  # For direct ID matches (q_1, q_2, etc.)
+    question_judge_types_by_index = {}  # For index-based matches (rubric_id_0, rubric_id_1, etc.)
+    parsed_questions = []
+    
+    if rubric and rubric.question:
+      parsed_questions = self._parse_rubric_questions(rubric.question)
+      for index, question in enumerate(parsed_questions):
+        question_id = question.get('id')  # e.g., "q_1"
+        question_judge_type = question.get('judge_type', default_judge_type)
+        
+        # Store by backend ID (q_1, q_2, etc.)
+        if question_id:
+          question_judge_types_by_id[question_id] = question_judge_type
+        
+        # Store by index for frontend format matching
+        question_judge_types_by_index[index] = question_judge_type
+        
+        # Also store by frontend format: {rubric_id}_{index}
+        frontend_id = f"{rubric.id}_{index}"
+        question_judge_types_by_id[frontend_id] = question_judge_type
+      
+      logger.info(f"📋 Question judge types by ID: {question_judge_types_by_id}")
+      logger.info(f"📋 Question judge types by index: {question_judge_types_by_index}")
+      logger.info(f"📋 Parsed {len(parsed_questions)} questions from rubric")
     
     # Validate and normalize ratings based on judge type
     validated_rating = None
     validated_ratings = None
     
     if annotation_data.rating is not None:
-      validated_rating = self._validate_and_normalize_rating(annotation_data.rating, judge_type)
+      validated_rating = self._validate_and_normalize_rating(annotation_data.rating, default_judge_type)
+      logger.info(f"✅ Validated legacy rating: {annotation_data.rating} -> {validated_rating}")
     
-    if annotation_data.ratings:
+    # Process ratings - handle both None and empty dict cases
+    # Note: ratings can be None (not provided), {} (empty), or {'q1': 0} (with 0 values)
+    if annotation_data.ratings is not None:
       validated_ratings = {}
       for question_id, rating_value in annotation_data.ratings.items():
+        # Explicitly check for None (0 is a valid value, so we need to check is not None)
         if rating_value is not None:
-          validated_ratings[question_id] = self._validate_and_normalize_rating(rating_value, judge_type)
+          # Get judge type for this specific question
+          # Try direct ID match first (works for both q_1 format and rubric_id_0 format)
+          question_judge_type = question_judge_types_by_id.get(question_id)
+          
+          # If not found, try to extract index from frontend format (rubric_id_index)
+          if question_judge_type is None and '_' in question_id:
+            try:
+              # Extract index from format like "1daa749b-d147-45e3-a667-fa3eca40269b_0"
+              index_str = question_id.split('_')[-1]
+              index = int(index_str)
+              question_judge_type = question_judge_types_by_index.get(index)
+            except (ValueError, IndexError):
+              pass
+          
+          # Fallback to default if still not found
+          if question_judge_type is None:
+            question_judge_type = default_judge_type
+            logger.warning(f"⚠️ Could not find judge type for question_id={question_id}, using default={default_judge_type}")
+          
+          logger.info(f"🔍 Validating {question_id} with judge_type={question_judge_type}, rating_value={rating_value}")
+          # Validate the rating (including 0 for binary Fail)
+          validated_value = self._validate_and_normalize_rating(rating_value, question_judge_type)
+          # Only add if validation succeeded (returns a number, including 0)
+          # Note: 0 is a valid value, so we check is not None (0 is not None)
+          if validated_value is not None:
+            validated_ratings[question_id] = validated_value
+            logger.info(f"✅ Validated rating for {question_id}: {rating_value} -> {validated_value} (judge_type={question_judge_type})")
+          else:
+            logger.error(f"❌ Validation returned None for {question_id}: rating_value={rating_value}, judge_type={question_judge_type}")
+            # For debugging: try to understand why validation failed
+            logger.error(f"   rating_value type: {type(rating_value)}, value: {repr(rating_value)}")
         else:
-          validated_ratings[question_id] = None
+          # rating_value is None - skip this question
+          logger.debug(f"⏭️ Skipping {question_id}: rating_value is None")
+      logger.info(f"📊 Final validated_ratings: {validated_ratings}")
     
     # Check if annotation already exists for this user and trace
     existing_annotation = (
@@ -864,12 +933,32 @@ class DatabaseService:
     )
 
     if existing_annotation:
-      # Update existing annotation
-      existing_annotation.rating = validated_rating
-      existing_annotation.ratings = validated_ratings
-      existing_annotation.comment = annotation_data.comment
+      logger.info(f"🔄 Updating existing annotation: id={existing_annotation.id}, current ratings={existing_annotation.ratings}")
+      # Update existing annotation - only update fields that are provided
+      if validated_rating is not None:
+        existing_annotation.rating = validated_rating
+        logger.info(f"  → Updated rating: {validated_rating}")
+      # Always update ratings if provided and validated
+      # validated_ratings will be None if ratings was not provided, or a dict if it was
+      if annotation_data.ratings is not None and validated_ratings is not None:
+        # Only update if we have validated ratings
+        # Note: validated_ratings can be {} if all validations failed, but we still update to clear
+        # However, if we received ratings but got empty dict, log a warning
+        if len(validated_ratings) == 0 and len(annotation_data.ratings) > 0:
+          logger.warning(f"⚠️ All ratings failed validation! Received: {annotation_data.ratings}, but validated_ratings is empty")
+          logger.warning(f"⚠️ Not updating ratings to avoid clearing existing data")
+        else:
+          existing_annotation.ratings = validated_ratings
+          logger.info(f"  → Updated ratings: {existing_annotation.ratings}")
+      elif annotation_data.ratings is not None:
+        # Ratings were provided but validation failed completely - log error
+        logger.error(f"❌ Ratings provided but validation failed completely: {annotation_data.ratings}")
+      if annotation_data.comment is not None:
+        existing_annotation.comment = annotation_data.comment
+        logger.info("  → Updated comment")
       self.db.commit()
       self.db.refresh(existing_annotation)
+      logger.info(f"✅ Annotation updated in DB: id={existing_annotation.id}, ratings={existing_annotation.ratings}")
       self._sync_annotation_with_mlflow(workshop_id, existing_annotation)
 
       return Annotation(
@@ -885,6 +974,7 @@ class DatabaseService:
       )
     else:
       # Create new annotation
+      logger.info(f"🆕 Creating new annotation")
       annotation_id = str(uuid.uuid4())
       db_annotation = AnnotationDB(
         id=annotation_id,
@@ -895,9 +985,11 @@ class DatabaseService:
         ratings=validated_ratings,
         comment=annotation_data.comment,
       )
+      logger.info(f"📝 New annotation object: rating={validated_rating}, ratings={validated_ratings}")
       self.db.add(db_annotation)
       self.db.commit()
       self.db.refresh(db_annotation)
+      logger.info(f"✅ Annotation created in DB: id={db_annotation.id}, ratings={db_annotation.ratings}")
       self._sync_annotation_with_mlflow(workshop_id, db_annotation)
 
       return Annotation(
@@ -920,20 +1012,27 @@ class DatabaseService:
       - For Likert: 1-5 (clamps to valid range)
       - None if rating is invalid
     """
+    logger.debug(f"🔍 _validate_and_normalize_rating: rating={rating} (type={type(rating)}), judge_type={judge_type}")
+    
     if rating is None:
+      logger.debug("  → Rating is None, returning None")
       return None
     
     # Convert to int if possible
     try:
       rating_int = int(float(rating))
-    except (ValueError, TypeError):
+      logger.debug(f"  → Converted to int: {rating_int}")
+    except (ValueError, TypeError) as e:
+      logger.warning(f"  → Failed to convert to int: {e}")
       return None
     
     if judge_type == 'binary':
       # Binary: only 0 or 1 are valid
       if rating_int == 0:
+        logger.debug(f"  → Binary rating 0 (Fail) - returning 0")
         return 0
       elif rating_int == 1:
+        logger.debug(f"  → Binary rating 1 (Pass) - returning 1")
         return 1
       else:
         # Normalize: any non-zero becomes 1, but log a warning
@@ -1850,8 +1949,43 @@ class DatabaseService:
     rubric = None
     if evaluations:
       rubric = self.get_rubric(evaluations[0].workshop_id)
-    judge_type = rubric.judge_type if rubric else 'likert'
-    is_binary = judge_type == 'binary'
+    
+    # Detect judge type: parse questions first (more accurate), then fall back to rubric-level judge_type
+    judge_type_str = 'likert'  # Default
+    if rubric:
+      # First, try to parse rubric questions to get per-question judge types
+      if rubric.question:
+        try:
+          questions = self._parse_rubric_questions(rubric.question)
+          if questions:
+            # Check if any question is binary
+            binary_questions = [q for q in questions if q.get('judge_type') == 'binary']
+            likert_questions = [q for q in questions if q.get('judge_type') == 'likert']
+            
+            if binary_questions and not likert_questions:
+              # All questions are binary
+              judge_type_str = 'binary'
+              logger.info(f"Detected binary judge type from rubric questions ({len(binary_questions)} binary questions) for evaluation validation")
+            elif likert_questions and not binary_questions:
+              # All questions are likert
+              judge_type_str = 'likert'
+            elif binary_questions:
+              # Mixed - but if we have binary questions, prefer binary
+              judge_type_str = 'binary'
+              logger.info(f"Detected binary judge type from rubric questions (mixed types, {len(binary_questions)} binary questions) for evaluation validation")
+        except Exception as parse_error:
+          logger.warning(f"Could not parse rubric questions for judge type detection: {parse_error}")
+      
+      # Fallback to rubric-level judge_type if no questions parsed or all questions are likert
+      if judge_type_str == 'likert' and hasattr(rubric, 'judge_type') and rubric.judge_type:
+        judge_type_enum = rubric.judge_type
+        if isinstance(judge_type_enum, JudgeType):
+          judge_type_str = judge_type_enum.value
+        else:
+          judge_type_str = str(judge_type_enum)
+    
+    is_binary = judge_type_str == 'binary'
+    logger.info(f"Judge type for evaluation validation: {judge_type_str}, is_binary={is_binary}")
 
     # Add new evaluations with validation
     for evaluation in evaluations:
@@ -1859,16 +1993,16 @@ class DatabaseService:
       validated_predicted_rating = evaluation.predicted_rating
       if validated_predicted_rating is not None:
         if is_binary:
-          # Binary: only 0 or 1 are valid
+          # Binary: only 0 or 1 are valid - reject anything else
           if validated_predicted_rating == 0:
             validated_predicted_rating = 0.0
           elif validated_predicted_rating == 1:
             validated_predicted_rating = 1.0
           else:
-            # Normalize invalid binary values
+            # Reject invalid binary values - set to None
             original_value = validated_predicted_rating
-            validated_predicted_rating = 1.0 if validated_predicted_rating != 0 else 0.0
-            logger.warning(f"Invalid binary predicted_rating {original_value} for trace {evaluation.trace_id[:8]}... - normalized to {validated_predicted_rating}")
+            validated_predicted_rating = None
+            logger.error(f"Invalid binary predicted_rating {original_value} for trace {evaluation.trace_id[:8]}... - must be 0 or 1, rejecting evaluation")
         else:
           # Likert: clamp to 1-5 range
           if not (1 <= validated_predicted_rating <= 5):
