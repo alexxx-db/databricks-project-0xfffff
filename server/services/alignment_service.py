@@ -739,12 +739,25 @@ class AlignmentService:
             # The prompt template with placeholders for judge instructions
             mlflow_prompt_template = self._normalize_judge_prompt(judge_prompt)
             
+            # Get judge type from rubric to determine feedback_value_type
+            judge_type = get_judge_type_from_rubric(self.db_service, workshop_id)
+            
+            # Set feedback_value_type based on judge type
+            # - Binary judges: use bool for Pass/Fail (True/False -> 1/0)
+            # - Likert judges: use float for 1-5 scale
+            if judge_type == 'binary':
+                feedback_type = bool
+                yield f"Detected binary rubric - creating judge with feedback_value_type=bool"
+            else:
+                feedback_type = float
+                yield f"Detected Likert rubric - creating judge with feedback_value_type=float"
+            
             # Create judge with the judge name - this name is critical for alignment
             # The judge can be used as a scorer in evaluate()
             judge = make_judge(
                 name=judge_name,  # Critical: must match for alignment
                 instructions=mlflow_prompt_template,
-                feedback_value_type=float,
+                feedback_value_type=feedback_type,
                 model=model_uri,
             )
             
@@ -779,6 +792,12 @@ class AlignmentService:
                     rows_without_trace_id = 0
                     skipped_unknown_traces = 0
                     
+                    # Get judge type early to properly convert PASS/FAIL for binary rubrics
+                    early_judge_type = get_judge_type_from_rubric(self.db_service, workshop_id)
+                    is_binary = early_judge_type == 'binary'
+                    if is_binary:
+                        yield f"Detected binary rubric - will convert PASS/FAIL to 1/0"
+                    
                     for idx, (_, row) in enumerate(result_df.iterrows()):
                         raw_trace_id = row.get('trace_id')
                         if raw_trace_id is None:
@@ -795,10 +814,40 @@ class AlignmentService:
                         predicted_value = row.get(judge_value_col)
                         predicted_rating = None
                         if predicted_value is not None and not pd.isna(predicted_value):
-                            try:
-                                predicted_rating = float(predicted_value)
-                            except (ValueError, TypeError) as e:
-                                yield f"WARNING: Could not convert '{predicted_value}' to float for trace {trace_id}: {e}"
+                            # Handle boolean values directly (from binary judges with feedback_value_type=bool)
+                            if isinstance(predicted_value, bool):
+                                predicted_rating = 1.0 if predicted_value else 0.0
+                            else:
+                                # Try to convert PASS/FAIL strings to 1/0 for binary rubrics
+                                str_value = str(predicted_value).strip().upper()
+                                if str_value in ('PASS', 'YES', 'TRUE', 'CORRECT', 'GOOD', 'ACCEPTABLE', '1'):
+                                    predicted_rating = 1.0
+                                elif str_value in ('FAIL', 'NO', 'FALSE', 'INCORRECT', 'BAD', 'UNACCEPTABLE', '0'):
+                                    predicted_rating = 0.0
+                                else:
+                                    # Try numeric conversion
+                                    try:
+                                        numeric_value = float(predicted_value)
+                                        # Validate and normalize for binary rubrics
+                                        if is_binary:
+                                            if numeric_value == 0:
+                                                predicted_rating = 0.0
+                                            elif numeric_value == 1:
+                                                predicted_rating = 1.0
+                                            else:
+                                                # Invalid binary value - normalize to 0 or 1
+                                                # Any non-zero becomes 1, but log a warning
+                                                predicted_rating = 1.0 if numeric_value != 0 else 0.0
+                                                yield f"WARNING: Invalid binary rating {numeric_value} for trace {trace_id[:8]}... - normalized to {predicted_rating}"
+                                        else:
+                                            # Likert scale: allow 1-5, clamp if out of range
+                                            if 1 <= numeric_value <= 5:
+                                                predicted_rating = numeric_value
+                                            else:
+                                                predicted_rating = max(1.0, min(5.0, numeric_value))
+                                                yield f"WARNING: Likert rating {numeric_value} out of range for trace {trace_id[:8]}... - clamped to {predicted_rating}"
+                                    except (ValueError, TypeError):
+                                        yield f"WARNING: Could not convert '{predicted_value}' to rating for trace {trace_id[:8]}..."
                         else:
                             null_prediction_rows += 1
                         

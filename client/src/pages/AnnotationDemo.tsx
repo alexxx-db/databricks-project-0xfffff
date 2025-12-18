@@ -795,14 +795,14 @@ export function AnnotationDemo() {
                         tabIndex={canAnnotate ? 0 : -1}
                         onKeyDown={(e) => e.key === 'Enter' && canAnnotate && setCurrentRatings(prev => ({ ...prev, [question.id]: 1 }))}
                       >
-                        <div className={`w-16 h-16 rounded-lg border-2 flex items-center justify-center transition-all ${
+                        <div className={`w-16 h-16 rounded-xl border-2 flex items-center justify-center transition-all duration-200 ${
                           currentRatings[question.id] === 1
-                            ? 'border-green-500 bg-green-100 shadow-md'
-                            : 'border-green-300 bg-green-50 hover:border-green-400'
+                            ? 'border-emerald-500 bg-emerald-50 shadow-md scale-105 ring-2 ring-emerald-200'
+                            : 'border-gray-300 bg-white hover:border-emerald-300 hover:bg-emerald-50/50'
                         }`}>
-                          <CheckCircle className={`w-8 h-8 ${currentRatings[question.id] === 1 ? 'text-green-600' : 'text-green-400'}`} />
+                          <CheckCircle className={`w-8 h-8 ${currentRatings[question.id] === 1 ? 'text-emerald-600' : 'text-gray-400'}`} />
                         </div>
-                        <span className="text-sm font-medium text-green-700">Pass</span>
+                        <span className={`text-sm font-semibold ${currentRatings[question.id] === 1 ? 'text-emerald-700' : 'text-gray-500'}`}>Pass</span>
                       </div>
                       <div 
                         className={`flex flex-col items-center gap-2 ${canAnnotate ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'}`}
@@ -811,14 +811,14 @@ export function AnnotationDemo() {
                         tabIndex={canAnnotate ? 0 : -1}
                         onKeyDown={(e) => e.key === 'Enter' && canAnnotate && setCurrentRatings(prev => ({ ...prev, [question.id]: 0 }))}
                       >
-                        <div className={`w-16 h-16 rounded-lg border-2 flex items-center justify-center transition-all ${
+                        <div className={`w-16 h-16 rounded-xl border-2 flex items-center justify-center transition-all duration-200 ${
                           currentRatings[question.id] === 0
-                            ? 'border-red-500 bg-red-100 shadow-md'
-                            : 'border-red-300 bg-red-50 hover:border-red-400'
+                            ? 'border-rose-400 bg-rose-50 shadow-md scale-105 ring-2 ring-rose-200'
+                            : 'border-gray-300 bg-white hover:border-rose-300 hover:bg-rose-50/50'
                         }`}>
-                          <AlertCircle className={`w-8 h-8 ${currentRatings[question.id] === 0 ? 'text-red-600' : 'text-red-400'}`} />
+                          <AlertCircle className={`w-8 h-8 ${currentRatings[question.id] === 0 ? 'text-rose-500' : 'text-gray-400'}`} />
                         </div>
-                        <span className="text-sm font-medium text-red-700">Fail</span>
+                        <span className={`text-sm font-semibold ${currentRatings[question.id] === 0 ? 'text-rose-600' : 'text-gray-500'}`}>Fail</span>
                       </div>
                     </div>
                   )}

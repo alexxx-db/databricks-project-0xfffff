@@ -362,6 +362,7 @@ export function RubricCreationDemo() {
     
     try {
       // Call the new update endpoint for individual questions
+      // Include judge_type to persist evaluation type changes
       const response = await fetch(`/workshops/${workshopId}/rubric/questions/${questionId}`, {
         method: 'PUT',
         headers: {
@@ -369,7 +370,8 @@ export function RubricCreationDemo() {
         },
         body: JSON.stringify({
           title: question.title,
-          description: question.description
+          description: question.description,
+          judge_type: question.judgeType  // Include the evaluation type
         }),
       });
       
@@ -380,7 +382,7 @@ export function RubricCreationDemo() {
       // Invalidate queries to refresh the UI
       queryClient.invalidateQueries({ queryKey: ['rubric', workshopId] });
       
-      
+      toast.success('Question updated successfully');
       setLastUpdatedQuestionId(questionId);
       
       // Clear success state after 3 seconds

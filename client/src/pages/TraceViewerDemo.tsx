@@ -5,7 +5,7 @@
  * This shows how the discovery interface will look during workshops.
  */
 
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { TraceViewer, TraceData } from '@/components/TraceViewer';
 import { TraceDataViewer } from '@/components/TraceDataViewer';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -122,11 +122,23 @@ export function TraceViewerDemo() {
           const improvementPart = parts[1];
           setQuestion1Response(qualityPart);
           setQuestion2Response(improvementPart);
+          // Track as "last saved" so we can detect future changes
+          lastSavedQ1Ref.current = qualityPart;
+          lastSavedQ2Ref.current = improvementPart;
+        } else {
+          // Couldn't parse, treat as raw text
+          setQuestion1Response(insight);
+          setQuestion2Response('');
+          lastSavedQ1Ref.current = insight;
+          lastSavedQ2Ref.current = '';
         }
       } else {
         // Clear responses for new trace
         setQuestion1Response('');
         setQuestion2Response('');
+        // Reset last saved refs
+        lastSavedQ1Ref.current = '';
+        lastSavedQ2Ref.current = '';
       }
       
       previousTraceId.current = currentTrace.id;
@@ -196,36 +208,91 @@ export function TraceViewerDemo() {
     }
   }, [existingFindings, traceData]);
 
-  const nextTrace = async () => {
-    if (!currentTrace) return;
+  
+  // Track the last saved content to detect changes (use refs to avoid stale closures)
+  const lastSavedQ1Ref = useRef('');
+  const lastSavedQ2Ref = useRef('');
+  
+  // Queue for pending saves - ensures saves are processed in order without blocking navigation
+  const saveQueueRef = useRef<Array<{q1: string, q2: string, traceId: string}>>([]);
+  const isProcessingQueueRef = useRef(false);
+  
+  // Process the save queue - runs saves one at a time in background (silently)
+  const processSaveQueue = useCallback(async () => {
+    if (isProcessingQueueRef.current || saveQueueRef.current.length === 0) return;
     
-    // Auto-save finding if responses are filled (works for both new and updated answers)
-    if (question1Response.trim() && question2Response.trim()) {
-      const isUpdate = submittedFindings.has(currentTrace.id);
+    isProcessingQueueRef.current = true;
+    
+    while (saveQueueRef.current.length > 0) {
+      const { q1, q2, traceId } = saveQueueRef.current.shift()!;
+      
+      const content = `Quality Assessment: ${q1}\n\nImprovement Analysis: ${q2}`;
+      
       try {
         await submitFinding.mutateAsync({
-          trace_id: currentTrace.id,
+          trace_id: traceId,
           user_id: user?.id || 'demo_user',
-          insight: `Quality Assessment: ${question1Response.trim()}\n\nImprovement Analysis: ${question2Response.trim()}`
+          insight: content
         });
-        setSubmittedFindings(prev => new Set([...prev, currentTrace.id]));
-        
-        // Show toast for updates
-        if (isUpdate) {
-          toast.success('Answer updated!');
-        }
+        setSubmittedFindings(prev => new Set([...prev, traceId]));
       } catch (error) {
+        console.error('Failed to save finding:', error);
         toast.error('Failed to save. Please try again.');
-        return; // Don't navigate if submission failed
       }
     }
     
-    // Navigate to next trace
+    isProcessingQueueRef.current = false;
+  }, [submitFinding, user?.id]);
+  
+  // Save finding function - queues the save and processes in background (silently, non-blocking)
+  const saveFinding = useCallback((q1: string, q2: string, traceId: string) => {
+    if (!q1.trim() || !q2.trim() || !traceId) return;
+    
+    const q1Trimmed = q1.trim();
+    const q2Trimmed = q2.trim();
+    
+    // Check if content has actually changed from last saved
+    const hasChanged = q1Trimmed !== lastSavedQ1Ref.current || q2Trimmed !== lastSavedQ2Ref.current;
+    
+    if (!hasChanged) {
+      return; // Silently skip - no change
+    }
+    
+    // Update last saved refs immediately to prevent duplicate saves
+    lastSavedQ1Ref.current = q1Trimmed;
+    lastSavedQ2Ref.current = q2Trimmed;
+    
+    // Add to queue (replace any existing entry for the same trace)
+    const existingIndex = saveQueueRef.current.findIndex(item => item.traceId === traceId);
+    if (existingIndex >= 0) {
+      saveQueueRef.current[existingIndex] = { q1: q1Trimmed, q2: q2Trimmed, traceId };
+    } else {
+      saveQueueRef.current.push({ q1: q1Trimmed, q2: q2Trimmed, traceId });
+    }
+    
+    // Process queue in background (non-blocking)
+    processSaveQueue();
+  }, [processSaveQueue]);
+  
+  // Handle blur on textareas - save immediately when user clicks away
+  const handleTextareaBlur = () => {
+    if (currentTrace && question1Response.trim() && question2Response.trim()) {
+      saveFinding(question1Response, question2Response, currentTrace.id);
+    }
+  };
+  
+  // Navigate to next trace - saves in background, navigates immediately
+  const nextTrace = () => {
+    if (!currentTrace) return;
+    
+    // Queue save in background if there's content (non-blocking)
+    if (question1Response.trim() && question2Response.trim()) {
+      saveFinding(question1Response, question2Response, currentTrace.id);
+    }
+    
+    // Navigate immediately to next trace (don't wait for save)
     if (currentTraceIndex < traceData.length - 1) {
       setCurrentTraceIndex((prev) => prev + 1);
-      // Clear responses for next trace
-      setQuestion1Response('');
-      setQuestion2Response('');
     }
   };
 
@@ -260,10 +327,18 @@ export function TraceViewerDemo() {
     }
   };
 
+  // Navigate to previous trace - saves in background, navigates immediately
   const prevTrace = () => {
+    if (!currentTrace) return;
+    
+    // Queue save in background if there's content (non-blocking)
+    if (question1Response.trim() && question2Response.trim()) {
+      saveFinding(question1Response, question2Response, currentTrace.id);
+    }
+    
+    // Navigate immediately to previous trace (don't wait for save)
     if (currentTraceIndex > 0) {
       setCurrentTraceIndex((prev) => prev - 1);
-      // Don't clear responses here - let the useEffect handle populating them
     }
   };
 
@@ -457,12 +532,6 @@ export function TraceViewerDemo() {
               <Badge variant="outline">
                 Trace {currentTraceIndex + 1} of {traceData.length}
               </Badge>
-              {submittedFindings.has(currentTrace.id) && (
-                <Badge className="bg-green-500">
-                  <CheckCircle className="h-3 w-3 mr-1" />
-                  Finding Submitted
-                </Badge>
-              )}
             </div>
           </div>
         </div>
@@ -518,6 +587,7 @@ export function TraceViewerDemo() {
                 placeholder={canCreateFindings ? "Share your thoughts on what makes this response work well or poorly..." : "You don't have permission to submit findings"}
                 value={question1Response}
                 onChange={(e) => setQuestion1Response(e.target.value)}
+                onBlur={handleTextareaBlur}
                 className="min-h-[100px]"
                 disabled={!canCreateFindings}
               />
@@ -532,20 +602,12 @@ export function TraceViewerDemo() {
                 placeholder={canCreateFindings ? "Consider alternative scenarios - what changes would flip the quality of this response?" : "You don't have permission to submit findings"}
                 value={question2Response}
                 onChange={(e) => setQuestion2Response(e.target.value)}
+                onBlur={handleTextareaBlur}
                 className="min-h-[100px]"
                 disabled={!canCreateFindings}
               />
             </div>
 
-            {/* Status indicator */}
-            {submittedFindings.has(currentTrace.id) && (
-              <div className="flex justify-end">
-                <Badge className="bg-green-500 text-white">
-                  <CheckCircle className="h-3 w-3 mr-1" />
-                  Finding Submitted
-                </Badge>
-              </div>
-            )}
           </CardContent>
         </Card>
 

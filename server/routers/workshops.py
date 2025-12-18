@@ -165,6 +165,13 @@ class AlignmentRequest(BaseModel):
   alignment_model_name: Optional[str] = None  # Model for SIMBA optimizer (judge_model_uri), required for alignment
   prompt_id: Optional[str] = None  # Existing prompt ID to update (instead of creating a new one)
 
+
+class SimpleEvaluationRequest(BaseModel):
+  """Request model for simple model serving evaluation (no MLflow)."""
+  judge_prompt: str
+  endpoint_name: str  # Databricks model serving endpoint name
+  prompt_id: Optional[str] = None  # Existing prompt ID to update
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
@@ -369,11 +376,12 @@ async def update_rubric_question(workshop_id: str, question_id: str, question_da
 
   title = question_data.get('title')
   description = question_data.get('description')
+  judge_type = question_data.get('judge_type')  # Optional: 'likert', 'binary', 'freeform'
 
   if not title or not description:
     raise HTTPException(status_code=400, detail='Title and description are required')
 
-  rubric = db_service.update_rubric_question(workshop_id, question_id, title, description)
+  rubric = db_service.update_rubric_question(workshop_id, question_id, title, description, judge_type)
   if not rubric:
     raise HTTPException(status_code=404, detail='Question not found or rubric not found')
 
@@ -2463,6 +2471,366 @@ async def start_evaluation_job(
     "job_id": job_id,
     "status": "running",
     "message": "Evaluation job started. Poll /evaluation-job/{job_id} for status."
+  }
+
+
+@router.post('/{workshop_id}/start-simple-evaluation')
+async def start_simple_evaluation(
+  workshop_id: str,
+  request: SimpleEvaluationRequest,
+  db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+  """Start a simple evaluation job using Databricks Model Serving (no MLflow required).
+  
+  This endpoint evaluates the judge prompt by directly calling a Databricks model serving
+  endpoint. This is useful when MLflow is not available or configured.
+  """
+  db_service = DatabaseService(db)
+  workshop = db_service.get_workshop(workshop_id)
+  if not workshop:
+    raise HTTPException(status_code=404, detail='Workshop not found')
+  
+  # Get MLflow config for Databricks credentials (host + token)
+  mlflow_config = db_service.get_mlflow_config(workshop_id)
+  if not mlflow_config:
+    raise HTTPException(status_code=400, detail='Databricks configuration not found. Please configure in Intake phase.')
+  
+  # Get Databricks token
+  from server.services.token_storage_service import token_storage
+  databricks_token = token_storage.get_token(workshop_id)
+  if not databricks_token:
+    databricks_token = db_service.get_databricks_token(workshop_id)
+    if databricks_token:
+      token_storage.store_token(workshop_id, databricks_token)
+  if not databricks_token:
+    raise HTTPException(status_code=400, detail='Databricks token not found')
+  
+  # Create job for tracking
+  job_id = str(uuid.uuid4())
+  job = create_job(job_id, workshop_id)
+  job.set_status("running")
+  job.add_log("Simple evaluation job started (using Databricks Model Serving)")
+  
+  # Run evaluation in background thread
+  def run_simple_evaluation_background():
+    import re
+    try:
+      from server.services.databricks_service import DatabricksService
+      from server.database import SessionLocal
+      from sklearn.metrics import cohen_kappa_score, accuracy_score, confusion_matrix
+      import numpy as np
+      
+      thread_db = SessionLocal()
+      try:
+        thread_db_service = DatabaseService(thread_db)
+        
+        # Initialize Databricks service
+        job.add_log(f"Connecting to Databricks workspace: {mlflow_config.databricks_host}")
+        databricks_svc = DatabricksService(
+          workspace_url=mlflow_config.databricks_host,
+          token=databricks_token
+        )
+        
+        # Get rubric to determine judge type (more reliable than inferring from ratings)
+        rubric = thread_db_service.get_rubric(workshop_id)
+        judge_type = rubric.judge_type if rubric else 'likert'
+        is_binary_judge = judge_type == 'binary'
+        
+        job.add_log(f"Judge type from rubric: {judge_type} ({'Binary (Pass/Fail)' if is_binary_judge else 'Likert (1-5)'})")
+        
+        # Get traces and annotations
+        traces = thread_db_service.get_traces(workshop_id)
+        annotations = thread_db_service.get_annotations(workshop_id)
+        
+        if not traces:
+          job.set_status("failed")
+          job.error = "No traces found"
+          job.add_log("ERROR: No traces found for evaluation")
+          job.save()
+          return
+        
+        if not annotations:
+          job.set_status("failed")
+          job.error = "No annotations found"
+          job.add_log("ERROR: No annotations found for evaluation")
+          job.save()
+          return
+        
+        job.add_log(f"Found {len(traces)} traces and {len(annotations)} annotations")
+        
+        # Group annotations by trace to get human ratings
+        # Use per-question ratings if available (supports binary 0/1), fall back to legacy rating
+        trace_annotations = {}
+        for ann in annotations:
+          if ann.trace_id not in trace_annotations:
+            trace_annotations[ann.trace_id] = []
+          
+          # Prefer ratings dict (contains actual 0/1 for binary, 1-5 for likert)
+          if ann.ratings and len(ann.ratings) > 0:
+            # Get all ratings from the dict (could be multiple questions)
+            for rating in ann.ratings.values():
+              trace_annotations[ann.trace_id].append(rating)
+          else:
+            # Fall back to legacy rating field
+            trace_annotations[ann.trace_id].append(ann.rating)
+        
+        # Get trace data mapping
+        trace_map = {t.id: t for t in traces}
+        
+        evaluations = []
+        job.add_log(f"Evaluating {len(trace_annotations)} traces using endpoint: {request.endpoint_name}")
+        
+        # Log sample ratings for debugging
+        all_ratings = []
+        for ratings in trace_annotations.values():
+          all_ratings.extend(ratings)
+        job.add_log(f"Sample ratings: {all_ratings[:10]}{'...' if len(all_ratings) > 10 else ''}")
+        
+        for idx, (trace_id, ratings) in enumerate(trace_annotations.items()):
+          trace = trace_map.get(trace_id)
+          if not trace:
+            continue
+          
+          # Get human rating based on judge type
+          if is_binary_judge:
+            # For binary, use majority vote (mode)
+            human_rating = 1 if sum(ratings) > len(ratings) / 2 else 0
+          else:
+            # For Likert, use rounded average
+            human_rating = round(sum(ratings) / len(ratings))
+          
+          # Get trace input and output directly from the Trace model
+          trace_input = trace.input or ''
+          trace_output = trace.output or ''
+          
+          # Log trace data status
+          has_input = bool(trace_input.strip())
+          has_output = bool(trace_output.strip())
+          
+          # Skip only if BOTH input and output are empty
+          if not has_input and not has_output:
+            job.add_log(f"Warning: Skipping trace {trace_id[:8]}... - no input/output data found")
+            continue
+          
+          # Log warning if output is empty (but still evaluate)
+          if not has_output:
+            job.add_log(f"Note: Trace {trace_id[:8]}... has no output, evaluating with input only")
+            trace_output = "(No output provided)"
+          
+          # Log first trace for debugging
+          if idx == 0:
+            job.add_log(f"Sample trace input (first 100 chars): {trace_input[:100]}...")
+            job.add_log(f"Sample trace output (first 100 chars): {trace_output[:100]}...")
+          
+          # Replace placeholders in prompt
+          filled_prompt = request.judge_prompt.replace('{input}', trace_input).replace('{output}', trace_output)
+          
+          try:
+            # Call Databricks model serving endpoint
+            response = databricks_svc.call_serving_endpoint(
+              endpoint_name=request.endpoint_name,
+              prompt=filled_prompt,
+              temperature=0.0,
+              max_tokens=500
+            )
+            
+            # Parse the response to extract rating based on judge type
+            response_text = response.get('choices', [{}])[0].get('message', {}).get('content', '')
+            response_lower = response_text.lower()
+            
+            predicted_rating = None
+            
+            if is_binary_judge:
+              # Binary judge: look for Pass/Fail keywords
+              pass_keywords = ['pass', 'yes', 'correct', 'meets', 'acceptable', 'approve', 'good']
+              fail_keywords = ['fail', 'no', 'incorrect', 'does not meet', 'unacceptable', 'reject', 'bad']
+              
+              if any(word in response_lower for word in pass_keywords):
+                predicted_rating = 1  # Pass
+              elif any(word in response_lower for word in fail_keywords):
+                predicted_rating = 0  # Fail
+              else:
+                # Try to extract 0 or 1
+                match = re.search(r'\b([01])\b', response_text)
+                if match:
+                  predicted_rating = int(match.group(1))
+              
+              # Default for binary
+              if predicted_rating is None:
+                job.add_log(f"Warning: Could not parse binary rating from response for trace {trace_id[:8]}... - defaulting to 1 (Pass). Response: {response_text[:100]}")
+                predicted_rating = 1  # Default to pass if unclear
+            else:
+              # Likert judge: look for numeric rating 1-5
+              match = re.search(r'\b([1-5])\b', response_text)
+              if match:
+                predicted_rating = int(match.group(1))
+              
+              # Default for Likert
+              if predicted_rating is None:
+                predicted_rating = 3  # Default to neutral if unclear
+            
+            evaluations.append({
+              'trace_id': trace_id,
+              'predicted_rating': predicted_rating,
+              'human_rating': human_rating,
+              'confidence': 0.8,
+              'reasoning': response_text[:500] if response_text else None
+            })
+            
+            if (idx + 1) % 5 == 0 or idx == len(trace_annotations) - 1:
+              job.add_log(f"Evaluated {idx + 1}/{len(trace_annotations)} traces")
+              
+          except Exception as eval_err:
+            import traceback
+            error_details = traceback.format_exc()
+            job.add_log(f"Warning: Failed to evaluate trace {trace_id[:8]}...: {str(eval_err)[:100]}")
+            job.add_log(f"Error details: {error_details[-300:]}")  # Last 300 chars of traceback
+            # Use default rating on error (use human rating as fallback)
+            evaluations.append({
+              'trace_id': trace_id,
+              'predicted_rating': human_rating,
+              'human_rating': human_rating,
+              'confidence': 0.0,
+              'reasoning': f"Evaluation error: {str(eval_err)}"
+            })
+        
+        if not evaluations:
+          job.set_status("failed")
+          job.error = "No evaluations completed"
+          job.add_log("ERROR: No evaluations completed successfully")
+          job.save()
+          return
+        
+        # Calculate metrics
+        job.add_log("Calculating evaluation metrics...")
+        predicted = [e['predicted_rating'] for e in evaluations]
+        human = [e['human_rating'] for e in evaluations]
+        
+        if is_binary_judge:
+          # Binary metrics: unweighted Cohen's Kappa, labels [0, 1]
+          job.add_log("Using binary metrics (Pass=1, Fail=0)")
+          try:
+            kappa = cohen_kappa_score(human, predicted)  # Unweighted for binary
+          except:
+            kappa = 0.0
+          
+          try:
+            conf_matrix = confusion_matrix(human, predicted, labels=[0, 1])
+            conf_matrix_list = conf_matrix.tolist()
+          except:
+            conf_matrix_list = [[0]*2 for _ in range(2)]
+        else:
+          # Likert metrics: quadratic weighted Cohen's Kappa, labels [1, 2, 3, 4, 5]
+          job.add_log("Using Likert metrics (1-5 scale)")
+          try:
+            kappa = cohen_kappa_score(human, predicted, weights='quadratic')
+          except:
+            kappa = 0.0
+          
+          try:
+            conf_matrix = confusion_matrix(human, predicted, labels=[1, 2, 3, 4, 5])
+            conf_matrix_list = conf_matrix.tolist()
+          except:
+            conf_matrix_list = [[0]*5 for _ in range(5)]
+        
+        accuracy = accuracy_score(human, predicted)
+        
+        metrics = {
+          'correlation': float(kappa),
+          'accuracy': float(accuracy),
+          'total_evaluations': len(evaluations),
+          'confusion_matrix': conf_matrix_list,
+          'agreement_by_rating': {},
+          'is_binary': is_binary_judge,
+          'judge_type': 'binary' if is_binary_judge else 'likert',
+          'rating_labels': ['Fail', 'Pass'] if is_binary_judge else ['1', '2', '3', '4', '5']
+        }
+        
+        job.add_log(f"Evaluation complete: κ={kappa:.3f}, accuracy={accuracy:.1%}, judge_type={'binary' if is_binary_judge else 'likert'}")
+        
+        # Build result
+        result = {
+          'success': True,
+          'evaluations': evaluations,
+          'metrics': metrics
+        }
+        
+        # Save to database
+        try:
+          import uuid as uuid_mod
+          from server.models import JudgePromptCreate, JudgeEvaluation
+          
+          # Use existing prompt_id if provided, otherwise create new
+          if request.prompt_id:
+            prompt_id_to_use = request.prompt_id
+            existing_prompt = thread_db_service.get_judge_prompt(workshop_id, request.prompt_id)
+            if existing_prompt:
+              result["saved_prompt_id"] = existing_prompt.id
+              result["saved_prompt_version"] = existing_prompt.version
+            else:
+              prompt_id_to_use = None
+          else:
+            prompt_id_to_use = None
+          
+          if not prompt_id_to_use:
+            new_prompt_data = JudgePromptCreate(
+              prompt_text=request.judge_prompt,
+              few_shot_examples=[],
+              model_name=f"simple:{request.endpoint_name}",
+              model_parameters={'mode': 'simple_model_serving'},
+            )
+            new_prompt = thread_db_service.create_judge_prompt(workshop_id, new_prompt_data)
+            prompt_id_to_use = new_prompt.id
+            result["saved_prompt_id"] = new_prompt.id
+            result["saved_prompt_version"] = new_prompt.version
+          
+          # Save metrics
+          thread_db_service.update_judge_prompt_metrics(prompt_id_to_use, metrics)
+          
+          # Save evaluations
+          evaluations_to_save = [
+            JudgeEvaluation(
+              id=str(uuid_mod.uuid4()),
+              workshop_id=workshop_id,
+              prompt_id=prompt_id_to_use,
+              trace_id=e['trace_id'],
+              predicted_rating=e['predicted_rating'],
+              human_rating=e['human_rating'],
+              confidence=e.get('confidence'),
+              reasoning=e.get('reasoning')
+            )
+            for e in evaluations
+          ]
+          thread_db_service.store_judge_evaluations(evaluations_to_save)
+          job.add_log(f"Saved {len(evaluations_to_save)} evaluations to database")
+          
+        except Exception as save_err:
+          job.add_log(f"WARNING: Could not save to database: {save_err}")
+        
+        job.result = result
+        job.set_status("completed")
+        job.add_log("Simple evaluation completed successfully")
+        job.save()
+        
+      finally:
+        thread_db.close()
+        
+    except Exception as e:
+      logger.exception("Simple evaluation job failed: %s", e)
+      job.set_status("failed")
+      job.error = str(e)
+      job.add_log(f"ERROR: Evaluation failed: {e}")
+      job.save()
+  
+  # Start background thread
+  thread = threading.Thread(target=run_simple_evaluation_background, daemon=True)
+  thread.start()
+  
+  logger.info("Started simple evaluation job %s", job_id)
+  return {
+    "job_id": job_id,
+    "status": "running",
+    "message": "Simple evaluation job started. Poll /evaluation-job/{job_id} for status."
   }
 
 

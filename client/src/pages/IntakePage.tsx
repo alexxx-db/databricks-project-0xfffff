@@ -483,25 +483,6 @@ export function IntakePage() {
         </CardContent>
       </Card>
 
-      {/* Ready for Discovery Banner */}
-      {status?.is_ingested && status.trace_count > 0 && (
-        <Card className="mb-6 border-green-200 bg-gradient-to-r from-green-50 to-emerald-50">
-          <CardContent className="pt-6">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center">
-                <CheckCircle className="w-5 h-5 text-green-600" />
-              </div>
-              <div className="flex-1">
-                <h4 className="font-semibold text-green-900">Ready for Discovery Phase</h4>
-                <p className="text-sm text-green-700">
-                  Traces have been successfully ingested. Use the sidebar workflow to start the discovery phase.
-                </p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
       {/* Reset & Delete Card - Always visible for facilitators */}
       <Card className="mb-6 border-red-200 bg-gradient-to-r from-red-50 to-orange-50">
         <CardHeader>
