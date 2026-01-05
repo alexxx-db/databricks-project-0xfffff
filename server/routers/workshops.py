@@ -691,8 +691,8 @@ async def begin_annotation_phase(workshop_id: str, request: dict = {}, db: Sessi
   Each user will see the same set of traces, but in a randomized order unique to them."""
   import random
 
-  # Get the optional trace limit from request (default to 10)
-  trace_limit = request.get('trace_limit', 10)
+  # Get the optional trace limit from request (default to 15)
+  trace_limit = request.get('trace_limit', 15)
 
   db_service = DatabaseService(db)
   workshop = db_service.get_workshop(workshop_id)
