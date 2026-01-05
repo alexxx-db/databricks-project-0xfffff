@@ -40,8 +40,10 @@ jobs:
             --exclude 'release-staging' \
             --exclude 'project-with-build.zip' \
             --exclude 'client-build.zip' \
-            --exclude 'client-build.tar.gz'
-            --exclude '.DS_Store'
+            --exclude 'client-build.tar.gz' \
+            --exclude '.DS_Store' && \
+          cd release-staging && \
+          zip -r ../project-with-build.zip project-0xfffff/
       # Upload as artifact for manual runs (testing)
       - name: Upload as artifact (manual trigger)
         if: github.event_name == 'workflow_dispatch'
