@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from server.config import ServerConfig
+from server.db_bootstrap import maybe_bootstrap_db_on_startup
 from server.routers import router
 
 
@@ -18,6 +19,11 @@ from server.routers import router
 async def lifespan(app: FastAPI):
   """Manage application lifespan with proper startup and shutdown."""
   print('🚀 Application startup - lifespan function called!')
+
+  # NOTE: This is a *fallback* safety net for deployments that don't run `just db-bootstrap`.
+  # It is designed to be safe under multi-process servers (e.g., gunicorn with multiple
+  # Uvicorn workers) via an inter-process lock.
+  maybe_bootstrap_db_on_startup()
 
   print('✅ Application startup complete!')
   yield

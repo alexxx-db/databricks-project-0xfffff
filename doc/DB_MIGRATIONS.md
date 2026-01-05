@@ -27,8 +27,27 @@ SQLite can’t perform many `ALTER TABLE` operations directly, so Alembic is con
 
 `just api-dev`, `just api`, and `just dev` automatically run `just db-bootstrap` before starting the server, so the schema is always current during development.
 
+Note: `just db-bootstrap` calls the shared implementation in `server/db_bootstrap.py` (single source of truth).
+
 ## Deploy
 
 Use `just deploy` to run DB bootstrap, build the UI, and then call `./deploy.sh`.
+
+## Fallback behavior (startup safety net)
+
+Deployments *should* run migrations as a separate step (via `just db-bootstrap`) before starting the API.
+However, if the API is started without running the CLI step, the server includes a small fallback:
+
+- If the SQLite DB file is **missing**, the API will attempt to **create it via Alembic** during startup.
+- This is protected by an **inter-process file lock**, so it is safe even when starting with multiple
+  gunicorn workers (each worker runs FastAPI lifespan).
+
+To enable a stronger (but more invasive) behavior—**stamp legacy DBs + apply pending migrations on startup**—set:
+
+- `DB_BOOTSTRAP_ON_STARTUP=true`
+
+To disable the fallback entirely:
+
+- `DB_BOOTSTRAP_ON_STARTUP=false`
 
 

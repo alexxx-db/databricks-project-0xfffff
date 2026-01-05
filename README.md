@@ -142,6 +142,26 @@ This will:
 4. **Build for production:**
    ```bash
    npm run build
+   ```
+
+## 🧪 End-to-End (E2E) Tests
+
+E2E tests are run with **Playwright** against a real local stack (FastAPI + Vite) using an **isolated SQLite database**.
+
+```bash
+# Run E2E tests headless (default)
+just e2e
+
+# Run E2E tests headed (useful for debugging)
+just e2e headed
+
+# Run E2E tests in Playwright UI mode
+just e2e ui
+
+# Debugging helpers
+just e2e-servers   # start API+UI against .e2e-workshop.db
+just e2e-test      # run tests (assumes servers are already running)
+```
 
 ## 🚢 Deploying to Databricks Apps Manually
 

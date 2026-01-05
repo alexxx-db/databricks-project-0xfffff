@@ -271,47 +271,9 @@ db-stamp:
 db-revision message:
   uv run alembic revision --autogenerate -m "{{message}}"
 
-[script]
+[group('db')]
 db-bootstrap:
-  import os
-  import sqlite3
-  import subprocess
-
-  def _db_path_from_url(url: str) -> str:
-    if url.startswith("sqlite:///"):
-      return url.replace("sqlite:///", "", 1)
-    if url.startswith("sqlite://"):
-      return url.replace("sqlite://", "", 1)
-    return url
-
-  url = os.getenv("DATABASE_URL", "sqlite:///./workshop.db")
-  db_path = _db_path_from_url(url)
-
-  def _run(*args: str) -> None:
-    cmd = ["uv", "run", "alembic", *args]
-    print(" ".join(cmd))
-    subprocess.check_call(cmd)
-
-  # No DB file yet: create via migrations.
-  if not os.path.exists(db_path):
-    _run("upgrade", "head")
-    raise SystemExit(0)
-
-  # If DB exists, decide between stamp and upgrade based on alembic_version table.
-  with sqlite3.connect(db_path) as conn:
-    cur = conn.cursor()
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    tables = [r[0] for r in cur.fetchall()]
-
-  user_tables = [t for t in tables if t and not t.startswith("sqlite_")]
-  has_alembic_version = "alembic_version" in tables
-
-  if user_tables and not has_alembic_version:
-    # Stamp to the baseline revision (not "head") so that legacy-fix migrations
-    # can still run and bring older DBs up to date.
-    _run("stamp", "0001_baseline")
-
-  _run("upgrade", "head")
+  uv run python -m server.db_bootstrap bootstrap
 
 [script]
 e2e-wait-ready api_port="8000" ui_port="3000" timeout_s="60":

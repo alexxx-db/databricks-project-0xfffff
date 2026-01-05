@@ -15,6 +15,7 @@ client/build/*
 .venv
 workshop.db
 *.db
+*.db.bootstrap.lock
 *.csv
 .claude/
 .databricks/
