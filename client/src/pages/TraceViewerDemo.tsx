@@ -425,7 +425,7 @@ export function TraceViewerDemo() {
       <div className="max-w-4xl mx-auto space-y-6">
         {/* Progress Header */}
         <div>
-          <h2 className="text-2xl font-bold text-gray-900 mb-2">Discovery Phase</h2>
+          <h2 className="text-2xl font-bold text-gray-900 mb-2" data-testid="discovery-phase-title">Discovery Phase</h2>
           <p className="text-gray-600 mb-4">Review LLM responses and share your insights</p>
           
           {/* Progress Bar */}
@@ -456,7 +456,7 @@ export function TraceViewerDemo() {
                 Trace {currentTraceIndex + 1} of {traceData.length}
               </Badge>
               {submittedFindings.has(currentTrace.id) && (
-                <Badge className="bg-green-500">
+                <Badge className="bg-green-500" data-testid="finding-submitted">
                   <CheckCircle className="h-3 w-3 mr-1" />
                   Finding Submitted
                 </Badge>
@@ -612,7 +612,7 @@ export function TraceViewerDemo() {
                     </>
                   ) : (
                     <>
-                      <CheckCircle className="h-4 w-4 mr-2" />
+                      <CheckCircle className="h-4 w-4 mr-2" data-testid="complete-discovery-phase-button" />
                       Complete Discovery Phase
                     </>
                   )}

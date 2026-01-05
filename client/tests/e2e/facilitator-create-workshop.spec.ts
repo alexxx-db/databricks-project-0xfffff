@@ -31,4 +31,3 @@ test('facilitator can log in and create a workshop', async ({ page, request }) =
   expect(workshopResp.ok(), 'created workshop should be retrievable from API').toBeTruthy();
 });
 
-

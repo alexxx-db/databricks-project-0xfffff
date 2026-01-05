@@ -252,6 +252,10 @@ ui-test:
   npm -C {{client-dir}} run test
 
 [group('dev')]
+ui-test-unit:
+  npm -C {{client-dir}} run test:unit
+  
+[group('dev')]
 ui-lint:
   npm -C {{client-dir}} run lint
 
