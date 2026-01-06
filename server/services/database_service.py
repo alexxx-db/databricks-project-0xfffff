@@ -2189,8 +2189,11 @@ class DatabaseService:
     
     Returns the number of traces deleted.
     """
-    # First, delete all annotations for these traces
-    from server.database import AnnotationDB, UserTraceOrderDB, RubricDB, MLflowIntakeConfigDB
+    # Import all related models
+    from server.database import (
+      AnnotationDB, UserTraceOrderDB, RubricDB, MLflowIntakeConfigDB,
+      DiscoveryFindingDB, UserDiscoveryCompletionDB, JudgePromptDB, JudgeEvaluationDB
+    )
     
     # Get trace IDs first
     trace_ids = [t.id for t in self.db.query(TraceDB).filter(TraceDB.workshop_id == workshop_id).all()]
@@ -2198,9 +2201,20 @@ class DatabaseService:
     if trace_ids:
       # Delete annotations for these traces
       self.db.query(AnnotationDB).filter(AnnotationDB.trace_id.in_(trace_ids)).delete(synchronize_session=False)
+      # Delete judge evaluations for these traces
+      self.db.query(JudgeEvaluationDB).filter(JudgeEvaluationDB.trace_id.in_(trace_ids)).delete(synchronize_session=False)
     
     # Delete user trace orders for this workshop
     self.db.query(UserTraceOrderDB).filter(UserTraceOrderDB.workshop_id == workshop_id).delete(synchronize_session=False)
+    
+    # Delete discovery findings for this workshop
+    self.db.query(DiscoveryFindingDB).filter(DiscoveryFindingDB.workshop_id == workshop_id).delete(synchronize_session=False)
+    
+    # Delete user discovery completions for this workshop
+    self.db.query(UserDiscoveryCompletionDB).filter(UserDiscoveryCompletionDB.workshop_id == workshop_id).delete(synchronize_session=False)
+    
+    # Delete judge prompts for this workshop (after evaluations are deleted)
+    self.db.query(JudgePromptDB).filter(JudgePromptDB.workshop_id == workshop_id).delete(synchronize_session=False)
     
     # Delete all traces
     deleted_count = self.db.query(TraceDB).filter(TraceDB.workshop_id == workshop_id).delete(synchronize_session=False)
