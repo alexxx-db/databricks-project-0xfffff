@@ -117,14 +117,14 @@ export function useTraces(workshopId: string, userId: string) {
       return response.json();
     },
     enabled: !!workshopId && !!userId,
-    // Reduced refetching to prevent Chrome performance issues
-    staleTime: 30 * 1000, // Data is fresh for 30 seconds
+    // Balanced settings for real-time updates without causing performance issues
+    staleTime: 10 * 1000, // Data is fresh for 10 seconds
     gcTime: 5 * 60 * 1000, // Cache for 5 minutes
     retry: 3, // Retry failed requests 3 times
     retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 30000), // Exponential backoff
-    refetchOnWindowFocus: false, // Disabled to prevent excessive refetching
+    refetchOnWindowFocus: true, // Refetch when user returns to tab
     refetchOnMount: true, // Refetch on component mount to get latest traces
-    refetchInterval: false, // DISABLED: Was causing Chrome hangs
+    refetchInterval: 15 * 1000, // Poll every 15 seconds to pick up new traces added by facilitator
   });
 }
 
@@ -310,6 +310,12 @@ export function useSubmitFinding(workshopId: string) {
       // Invalidate related queries
       queryClient.invalidateQueries({ queryKey: ['discovery-completion-status', workshopId] });
       queryClient.invalidateQueries({ queryKey: ['user-discovery-complete', workshopId, finding.user_id] });
+      
+      // Invalidate facilitator findings queries so they see new findings in Discovery Responses
+      queryClient.invalidateQueries({ queryKey: ['findings', workshopId, 'all_findings'] });
+      queryClient.invalidateQueries({ queryKey: ['findings', workshopId, 'all_findings', 'with_user_details'] });
+      // Also invalidate the direct endpoint query used in FindingsReviewPage
+      queryClient.invalidateQueries({ queryKey: ['facilitator-findings-with-users', workshopId] });
     },
   });
 }

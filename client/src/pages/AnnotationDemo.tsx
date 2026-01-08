@@ -629,22 +629,39 @@ export function AnnotationDemo() {
       return; // Prevent concurrent navigation
     }
     
-    // Check if we can navigate
-    if (currentTraceIndex >= traceData.length - 1) {
-      // On the last trace, show completion message
-      toast.success('All traces annotated! Great work.');
-      return;
-    }
-    
-    console.log('nextTrace: Starting optimistic navigation', { currentTraceIndex, nextIndex: currentTraceIndex + 1 });
-    setIsNavigating(true);
-    
-    // Store current trace data for background save
+    // Store current trace data for save
     const currentTraceId = currentTrace.id;
     const ratingsToSave = { ...currentRatings };
     const freeformToSave = { ...freeformResponses };
     const commentToSave = comment;
     const hasRatings = Object.keys(ratingsToSave).length > 0;
+    
+    // Check if we're on the last trace
+    if (currentTraceIndex >= traceData.length - 1) {
+      // On the last trace, save the annotation first, then show completion message
+      if (hasRatings) {
+        console.log('nextTrace: Saving final annotation', { traceId: currentTraceId });
+        saveAnnotation(currentTraceId, false, ratingsToSave, freeformToSave, commentToSave)
+          .then((success) => {
+            if (success) {
+              console.log('nextTrace: Final annotation saved successfully');
+              toast.success('All traces annotated! Great work.');
+            } else {
+              toast.error('Failed to save annotation. Please try again.');
+            }
+          })
+          .catch((error) => {
+            console.error('nextTrace: Error saving final annotation:', error);
+            toast.error('Failed to save annotation. Please try again.');
+          });
+      } else {
+        toast.success('All traces annotated! Great work.');
+      }
+      return;
+    }
+    
+    console.log('nextTrace: Starting optimistic navigation', { currentTraceIndex, nextIndex: currentTraceIndex + 1 });
+    setIsNavigating(true);
     
     // Navigate immediately (optimistic)
     const nextIndex = currentTraceIndex + 1;

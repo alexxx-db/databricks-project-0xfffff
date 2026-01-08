@@ -337,11 +337,18 @@ export function JudgeTuningPage() {
               : (rubricData.judge_type || 'likert'))
           : 'likert';
         
-        const promptJudgeType = latestPrompt.judge_type || 'likert';
+        // Check both the metadata judge_type AND the actual prompt content
+        const promptMetadataJudgeType = latestPrompt.judge_type || 'likert';
+        const promptContentJudgeType = detectPromptJudgeType(latestPrompt.prompt_text);
         
-        // If judge types don't match, update prompt to use correct template
-        if (currentRubricJudgeType !== promptJudgeType && rubricData) {
-          console.log(`Prompt judge type (${promptJudgeType}) doesn't match rubric judge type (${currentRubricJudgeType}), updating prompt template...`);
+        // If rubric judge type doesn't match EITHER the metadata OR the actual content, regenerate
+        const needsRegeneration = rubricData && (
+          currentRubricJudgeType !== promptMetadataJudgeType || 
+          currentRubricJudgeType !== promptContentJudgeType
+        );
+        
+        if (needsRegeneration) {
+          console.log(`Prompt mismatch detected - rubric: ${currentRubricJudgeType}, metadata: ${promptMetadataJudgeType}, content: ${promptContentJudgeType}. Regenerating...`);
           const updatedPrompt = createDefaultPrompt(rubricData.question);
           setCurrentPrompt(updatedPrompt);
           setOriginalPromptText(updatedPrompt);
@@ -374,10 +381,11 @@ export function JudgeTuningPage() {
           setSelectedAlignmentModel(defaultModel);
         }
         
-        // Set metrics if available from the saved prompt
-        if (latestPrompt.performance_metrics) {
-          setMetrics(latestPrompt.performance_metrics as JudgePerformanceMetrics);
-        }
+        // Don't auto-load metrics from saved prompts - only show metrics after running evaluation
+        // This prevents showing stale metrics with "Mode" badge before user runs evaluation
+        // if (latestPrompt.performance_metrics) {
+        //   setMetrics(latestPrompt.performance_metrics as JudgePerformanceMetrics);
+        // }
         
         // Load evaluations if they exist
         loadEvaluations(latestPrompt.id);
@@ -388,6 +396,20 @@ export function JudgeTuningPage() {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // Helper to detect judge type from prompt content
+  const detectPromptJudgeType = (promptText: string): JudgeType => {
+    if (promptText.includes('scale of 0-1') || promptText.includes('0 or 1') || promptText.includes('(PASS)') || promptText.includes('(FAIL)')) {
+      return 'binary';
+    }
+    if (promptText.includes('scale of 1-5') || promptText.includes('1 = Poor') || promptText.includes('5 = Excellent')) {
+      return 'likert';
+    }
+    if (promptText.includes('qualitative feedback') || promptText.includes('detailed feedback') || promptText.includes('Key observations')) {
+      return 'freeform';
+    }
+    return 'likert'; // default
   };
 
   const createDefaultPrompt = (rubricQuestion: string) => {
@@ -528,11 +550,12 @@ The response partially meets the criteria because...`;
         }
       }
       
-      // Set metrics from the prompt's performance data if available
-      const prompt = prompts.find(p => p.id === promptId);
-      if (prompt?.performance_metrics) {
-        setMetrics(prompt.performance_metrics as JudgePerformanceMetrics);
-      }
+      // Don't auto-load metrics from saved prompts when switching versions
+      // Metrics should only show after running evaluation in current session
+      // const prompt = prompts.find(p => p.id === promptId);
+      // if (prompt?.performance_metrics) {
+      //   setMetrics(prompt.performance_metrics as JudgePerformanceMetrics);
+      // }
     } catch (err) {
       // Silent fail for evaluation loading
     }
@@ -547,6 +570,7 @@ The response partially meets the criteria because...`;
     try {
       const promptData: JudgePromptCreate = {
         prompt_text: currentPrompt,
+        judge_type: judgeType, // Include judge type to ensure correct template association
         few_shot_examples: [],
         model_name: getBackendModelName(selectedEvaluationModel),
         model_parameters: selectedEvaluationModel === 'demo' ? null : { temperature: 0.0, max_tokens: 10 }
@@ -652,6 +676,17 @@ The response partially meets the criteria because...`;
     URL.revokeObjectURL(url);
     
     toast.success('Prompt downloaded successfully');
+  };
+
+  const handleResetToDefaultTemplate = () => {
+    if (!rubric?.question) {
+      toast.error('No rubric question available');
+      return;
+    }
+    const defaultPrompt = createDefaultPrompt(rubric.question);
+    setCurrentPrompt(defaultPrompt);
+    setIsModified(true);
+    toast.success(`Prompt reset to ${judgeType === 'likert' ? 'Likert (1-5)' : judgeType === 'binary' ? 'Binary (0-1)' : 'Free-form'} template`);
   };
 
   const handleEvaluatePrompt = async () => {
@@ -1235,6 +1270,16 @@ The response partially meets the criteria because...`;
                   >
                     <Download className="h-4 w-4" />
                   </Button>
+                  {/* Reset to Default Template */}
+                  <Button 
+                    onClick={handleResetToDefaultTemplate}
+                    disabled={!rubric?.question}
+                    variant="outline"
+                    size="sm"
+                    title="Reset prompt to default template for current judge type"
+                  >
+                    <RefreshCw className="h-4 w-4" />
+                  </Button>
                 </div>
               </div>
             </CardContent>
@@ -1277,8 +1322,8 @@ The response partially meets the criteria because...`;
             </div>
           )}
 
-          {/* Performance Metrics Bar */}
-          {metrics && (() => {
+          {/* Performance Metrics Bar - Only show after evaluation has been run */}
+          {metrics && hasEvaluated && (() => {
             const agreementByRating = metrics.agreement_by_rating || {};
             return (
               <div className="bg-white rounded-lg border p-4 mb-4">

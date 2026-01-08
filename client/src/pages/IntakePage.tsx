@@ -236,10 +236,23 @@ export function IntakePage() {
         
         await loadStatus();
         
-        // Invalidate trace caches
+        // Invalidate ALL workshop-related caches for a complete reset
         queryClient.invalidateQueries({ queryKey: ['traces', workshopId] });
         queryClient.invalidateQueries({ queryKey: ['all-traces', workshopId] });
         queryClient.invalidateQueries({ queryKey: ['workshop', workshopId] });
+        queryClient.invalidateQueries({ queryKey: ['rubric', workshopId] });
+        queryClient.invalidateQueries({ queryKey: ['annotations', workshopId] });
+        queryClient.invalidateQueries({ queryKey: ['findings', workshopId] });
+        queryClient.invalidateQueries({ queryKey: ['judge-prompts', workshopId] });
+        queryClient.invalidateQueries({ queryKey: ['irr', workshopId] });
+        queryClient.invalidateQueries({ queryKey: ['mlflowConfig', workshopId] });
+        // Invalidate any queries that contain this workshopId (catches all variations)
+        queryClient.invalidateQueries({ 
+          predicate: (query) => {
+            const key = query.queryKey;
+            return Array.isArray(key) && key.some(k => k === workshopId);
+          }
+        });
         
         toast.success(`Deleted ${result.deleted_count} traces. Workshop reset to intake phase.`);
       } else {
