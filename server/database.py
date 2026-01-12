@@ -375,11 +375,10 @@ def get_db():
 
 
 def create_tables():
-    """Legacy helper to create tables directly (not used in normal operation).
+  """Legacy helper to create tables directly (not used in normal operation).
 
-    Schema changes should be applied via Alembic migrations, not at runtime.
-    """
-  """Create all database tables."""
+  Schema changes should be applied via Alembic migrations, not at runtime.
+  """
   try:
     print('🔧 Creating database tables...')
     # Use checkfirst=True to avoid errors if tables already exist
