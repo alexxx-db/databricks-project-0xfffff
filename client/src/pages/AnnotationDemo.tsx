@@ -273,55 +273,6 @@ export function AnnotationDemo() {
     
     return { userComment, freeformData };
   };
-  
-  // Helper function to check if annotation values have changed
-  const hasAnnotationChanged = (traceId: string) => {
-    const savedState = savedStateRef.current.get(traceId);
-    if (!savedState) {
-      // No saved state means this is a new annotation
-      return Object.keys(currentRatings).length > 0;
-    }
-    
-    // Check if ratings changed
-    const ratingKeys = Object.keys(currentRatings);
-    const savedRatingKeys = Object.keys(savedState.ratings);
-    
-    // If we have ratings but saved state is missing some keys, allow saving
-    if (ratingKeys.length > 0) {
-      for (const key of ratingKeys) {
-        if (!(key in savedState.ratings) || currentRatings[key] !== savedState.ratings[key]) {
-          return true;
-        }
-      }
-      // Also check if saved state has keys that currentRatings doesn't (rating was removed)
-      for (const key of savedRatingKeys) {
-        if (!(key in currentRatings)) {
-          return true;
-        }
-      }
-    }
-    
-    // Check if freeform responses changed
-    const freeformKeys = Object.keys(freeformResponses);
-    const savedFreeformKeys = Object.keys(savedState.freeformResponses);
-    if (freeformKeys.length !== savedFreeformKeys.length) {
-      return true;
-    }
-    for (const key of freeformKeys) {
-      if (freeformResponses[key] !== savedState.freeformResponses[key]) {
-        return true;
-      }
-    }
-    
-    // Check if comment changed
-    const currentCommentTrimmed = comment.trim();
-    const savedCommentTrimmed = savedState.comment.trim();
-    if (currentCommentTrimmed !== savedCommentTrimmed) {
-      return true;
-    }
-    
-    return false;
-  };
 
 
 
@@ -536,10 +487,43 @@ export function AnnotationDemo() {
         return false;
       }
       
-      const hasChanges = hasAnnotationChanged(targetTraceId);
-      if (!hasChanges) {
-        console.log(`No changes detected for trace ${targetTraceId}, skipping save`);
-        return true; // No change needed, return success
+      // Check for changes using the actual values we're about to save (not just currentRatings state)
+      const savedState = savedStateRef.current.get(targetTraceId);
+      if (savedState) {
+        // Compare using ratingsToSave (the override values), not currentRatings (React state)
+        const ratingKeys = Object.keys(ratingsToSave);
+        let hasChanges = false;
+        
+        if (ratingKeys.length > 0) {
+          for (const key of ratingKeys) {
+            if (!(key in savedState.ratings) || ratingsToSave[key] !== savedState.ratings[key]) {
+              hasChanges = true;
+              break;
+            }
+          }
+          // Also check if saved state has keys that ratingsToSave doesn't (rating was removed)
+          if (!hasChanges) {
+            for (const key of Object.keys(savedState.ratings)) {
+              if (!(key in ratingsToSave)) {
+                hasChanges = true;
+                break;
+              }
+            }
+          }
+        }
+        
+        // Also check comment changes
+        if (!hasChanges && commentToSave !== savedState.comment) {
+          hasChanges = true;
+        }
+        
+        if (!hasChanges) {
+          console.log(`No changes detected for trace ${targetTraceId}, skipping save`);
+          // Even though we skip the save, ensure the trace is marked as submitted
+          // This fixes the issue where "Complete" doesn't record the last trace
+          setSubmittedAnnotations(prev => new Set([...prev, targetTraceId]));
+          return true; // No change needed, return success
+        }
       }
       
       // Set saving flag for user-initiated saves
@@ -619,7 +603,7 @@ export function AnnotationDemo() {
     }
   };
 
-  const nextTrace = () => {
+  const nextTrace = async () => {
     if (!currentTrace) {
       console.warn('nextTrace: No current trace');
       return;
@@ -638,24 +622,29 @@ export function AnnotationDemo() {
     
     // Check if we're on the last trace
     if (currentTraceIndex >= traceData.length - 1) {
-      // On the last trace, save the annotation first, then show completion message
-      if (hasRatings) {
-        console.log('nextTrace: Saving final annotation', { traceId: currentTraceId });
-        saveAnnotation(currentTraceId, false, ratingsToSave, freeformToSave, commentToSave)
-          .then((success) => {
-            if (success) {
-              console.log('nextTrace: Final annotation saved successfully');
-              toast.success('All traces annotated! Great work.');
-            } else {
-              toast.error('Failed to save annotation. Please try again.');
-            }
-          })
-          .catch((error) => {
-            console.error('nextTrace: Error saving final annotation:', error);
+      // On the last trace, MUST await the save to ensure it completes
+      // This fixes the issue where the last trace annotation is not recorded
+      setIsNavigating(true);
+      try {
+        if (hasRatings) {
+          console.log('nextTrace: Saving final annotation (awaiting)', { traceId: currentTraceId });
+          const success = await saveAnnotation(currentTraceId, false, ratingsToSave, freeformToSave, commentToSave);
+          if (success) {
+            console.log('nextTrace: Final annotation saved successfully');
+            toast.success('All traces annotated! Great work.');
+          } else {
             toast.error('Failed to save annotation. Please try again.');
-          });
-      } else {
-        toast.success('All traces annotated! Great work.');
+          }
+        } else {
+          // No ratings but still mark as submitted to update progress
+          setSubmittedAnnotations(prev => new Set([...prev, currentTraceId]));
+          toast.success('All traces annotated! Great work.');
+        }
+      } catch (error) {
+        console.error('nextTrace: Error saving final annotation:', error);
+        toast.error('Failed to save annotation. Please try again.');
+      } finally {
+        setIsNavigating(false);
       }
       return;
     }
