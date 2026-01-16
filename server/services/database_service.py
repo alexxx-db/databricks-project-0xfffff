@@ -120,18 +120,9 @@ class DatabaseService:
       created_at=db_workshop.created_at,
     )
 
-  def get_workshop(self, workshop_id: str) -> Optional[Workshop]:
-    """Get a workshop by ID with caching."""
-    cache_key = self._get_cache_key('workshop', workshop_id)
-    cached_workshop = self._get_from_cache(cache_key)
-    if cached_workshop is not None:
-      return cached_workshop
-
-    db_workshop = self.db.query(WorkshopDB).filter(WorkshopDB.id == workshop_id).first()
-    if not db_workshop:
-      return None
-
-    workshop = Workshop(
+  def _workshop_from_db(self, db_workshop: WorkshopDB) -> Workshop:
+    """Convert a database workshop object to a Workshop model."""
+    return Workshop(
       id=db_workshop.id,
       name=db_workshop.name,
       description=db_workshop.description,
@@ -143,9 +134,24 @@ class DatabaseService:
       annotation_started=db_workshop.annotation_started or False,
       active_discovery_trace_ids=db_workshop.active_discovery_trace_ids or [],
       active_annotation_trace_ids=db_workshop.active_annotation_trace_ids or [],
+      discovery_randomize_traces=getattr(db_workshop, 'discovery_randomize_traces', False) or False,
+      annotation_randomize_traces=getattr(db_workshop, 'annotation_randomize_traces', False) or False,
       judge_name=db_workshop.judge_name or 'workshop_judge',
       created_at=db_workshop.created_at,
     )
+
+  def get_workshop(self, workshop_id: str) -> Optional[Workshop]:
+    """Get a workshop by ID with caching."""
+    cache_key = self._get_cache_key('workshop', workshop_id)
+    cached_workshop = self._get_from_cache(cache_key)
+    if cached_workshop is not None:
+      return cached_workshop
+
+    db_workshop = self.db.query(WorkshopDB).filter(WorkshopDB.id == workshop_id).first()
+    if not db_workshop:
+      return None
+
+    workshop = self._workshop_from_db(db_workshop)
 
     self._set_cache(cache_key, workshop)
     return workshop
@@ -236,20 +242,7 @@ class DatabaseService:
     self.db.commit()
     self.db.refresh(db_workshop)
 
-    return Workshop(
-      id=db_workshop.id,
-      name=db_workshop.name,
-      description=db_workshop.description,
-      facilitator_id=db_workshop.facilitator_id,
-      status=db_workshop.status,
-      current_phase=db_workshop.current_phase,
-      completed_phases=db_workshop.completed_phases or [],
-      discovery_started=db_workshop.discovery_started or False,
-      annotation_started=db_workshop.annotation_started or False,
-      active_discovery_trace_ids=db_workshop.active_discovery_trace_ids or [],
-      active_annotation_trace_ids=db_workshop.active_annotation_trace_ids or [],
-      created_at=db_workshop.created_at,
-    )
+    return self._workshop_from_db(db_workshop)
 
   def update_active_annotation_traces(self, workshop_id: str, trace_ids: List[str]) -> Optional[Workshop]:
     """Update the active annotation trace IDs for a workshop."""
@@ -261,20 +254,31 @@ class DatabaseService:
     self.db.commit()
     self.db.refresh(db_workshop)
 
-    return Workshop(
-      id=db_workshop.id,
-      name=db_workshop.name,
-      description=db_workshop.description,
-      facilitator_id=db_workshop.facilitator_id,
-      status=db_workshop.status,
-      current_phase=db_workshop.current_phase,
-      completed_phases=db_workshop.completed_phases or [],
-      discovery_started=db_workshop.discovery_started or False,
-      annotation_started=db_workshop.annotation_started or False,
-      active_discovery_trace_ids=db_workshop.active_discovery_trace_ids or [],
-      active_annotation_trace_ids=db_workshop.active_annotation_trace_ids or [],
-      created_at=db_workshop.created_at,
-    )
+    return self._workshop_from_db(db_workshop)
+
+  def update_discovery_randomize_setting(self, workshop_id: str, randomize: bool) -> Optional[Workshop]:
+    """Update the discovery trace randomization setting for a workshop."""
+    db_workshop = self.db.query(WorkshopDB).filter(WorkshopDB.id == workshop_id).first()
+    if not db_workshop:
+      return None
+
+    db_workshop.discovery_randomize_traces = randomize
+    self.db.commit()
+    self.db.refresh(db_workshop)
+
+    return self._workshop_from_db(db_workshop)
+
+  def update_annotation_randomize_setting(self, workshop_id: str, randomize: bool) -> Optional[Workshop]:
+    """Update the annotation trace randomization setting for a workshop."""
+    db_workshop = self.db.query(WorkshopDB).filter(WorkshopDB.id == workshop_id).first()
+    if not db_workshop:
+      return None
+
+    db_workshop.annotation_randomize_traces = randomize
+    self.db.commit()
+    self.db.refresh(db_workshop)
+
+    return self._workshop_from_db(db_workshop)
 
   # Trace operations
   def add_traces(self, workshop_id: str, traces: List[TraceUpload]) -> List[Trace]:
@@ -330,17 +334,18 @@ class DatabaseService:
     return [self._trace_from_db(db_trace) for db_trace in db_traces]
 
   def get_active_discovery_traces(self, workshop_id: str, user_id: str) -> List[Trace]:
-    """Get only the active discovery traces for a workshop in user-specific randomized order.
+    """Get only the active discovery traces for a workshop.
 
-    Each user sees the same set of traces but in a different randomized order.
-    The order is deterministic per user (based on user_id seed).
+    If randomization is enabled for the workshop, each user sees traces in a different 
+    randomized order (deterministic per user based on user_id seed).
+    If randomization is disabled (default), all users see traces in the same chronological order.
 
     Args:
         workshop_id: The workshop ID
-        user_id: The user ID (required for personalized trace ordering)
+        user_id: The user ID (required for personalized trace ordering when randomization is enabled)
 
     Returns:
-        List of traces in user-specific randomized order
+        List of traces in appropriate order
 
     Raises:
         ValueError: If user_id is not provided
@@ -358,8 +363,30 @@ class DatabaseService:
       return []
 
     active_trace_ids = workshop.active_discovery_trace_ids
+    
+    # Check if randomization is enabled for this workshop
+    randomize_enabled = getattr(workshop, 'discovery_randomize_traces', False) or False
 
-    # Get or create user-specific trace order
+    if not randomize_enabled:
+      # Randomization OFF: Return traces in chronological order (same for all users)
+      # Fetch traces in the order they appear in active_discovery_trace_ids
+      db_traces = self.db.query(TraceDB).filter(TraceDB.id.in_(active_trace_ids)).all()
+      
+      # Create ordered result - preserve the chronological order from active_discovery_trace_ids
+      trace_map = {t.id: t for t in db_traces}
+      result = []
+      for tid in active_trace_ids:
+        if tid in trace_map:
+          result.append(self._trace_from_db(trace_map[tid]))
+
+      # Log performance metrics
+      load_time = time.time() - start_time
+      if load_time > 0.1:
+        print(f'⚠️ Slow trace load: {load_time:.3f}s for {len(result)} traces (user: {user_id[:8]}..., no randomization)')
+
+      return result
+
+    # Randomization ON: Get or create user-specific trace order
     user_order = self.get_user_trace_order(workshop_id, user_id)
     
     if not user_order:
@@ -400,7 +427,7 @@ class DatabaseService:
     # Log performance metrics
     load_time = time.time() - start_time
     if load_time > 0.1:  # Log slow requests
-      print(f'⚠️ Slow trace load: {load_time:.3f}s for {len(result)} traces (user: {user_id[:8]}...)')
+      print(f'⚠️ Slow trace load: {load_time:.3f}s for {len(result)} traces (user: {user_id[:8]}..., randomized)')
 
     return result
 
@@ -441,17 +468,18 @@ class DatabaseService:
     return randomized_ids
 
   def get_active_annotation_traces(self, workshop_id: str, user_id: str) -> List[Trace]:
-    """Get only the active annotation traces for a workshop in user-specific randomized order.
+    """Get only the active annotation traces for a workshop.
 
-    Each user sees the same set of traces but in a different randomized order.
-    The order is deterministic per user (based on user_id seed).
+    If randomization is enabled for the workshop, each user sees traces in a different 
+    randomized order (deterministic per user based on user_id seed).
+    If randomization is disabled (default), all users see traces in the same chronological order.
 
     Args:
         workshop_id: The workshop ID
-        user_id: The user ID (required for personalized trace ordering)
+        user_id: The user ID (required for personalized trace ordering when randomization is enabled)
 
     Returns:
-        List of traces in user-specific randomized order
+        List of traces in appropriate order
 
     Raises:
         ValueError: If user_id is not provided
@@ -468,8 +496,30 @@ class DatabaseService:
       return []
 
     active_trace_ids = workshop.active_annotation_trace_ids
+    
+    # Check if randomization is enabled for this workshop
+    randomize_enabled = getattr(workshop, 'annotation_randomize_traces', False) or False
 
-    # Get or create user-specific trace order
+    if not randomize_enabled:
+      # Randomization OFF: Return traces in chronological order (same for all users)
+      # Fetch traces in the order they appear in active_annotation_trace_ids
+      db_traces = self.db.query(TraceDB).filter(TraceDB.id.in_(active_trace_ids)).all()
+      
+      # Create ordered result - preserve the chronological order from active_annotation_trace_ids
+      trace_map = {t.id: t for t in db_traces}
+      result = []
+      for tid in active_trace_ids:
+        if tid in trace_map:
+          result.append(self._trace_from_db(trace_map[tid]))
+
+      # Log performance metrics
+      load_time = time.time() - start_time
+      if load_time > 0.1:
+        print(f'⚠️ Slow annotation trace load: {load_time:.3f}s for {len(result)} traces (user: {user_id[:8]}..., no randomization)')
+
+      return result
+
+    # Randomization ON: Get or create user-specific trace order
     user_order = self.get_user_trace_order(workshop_id, user_id)
     
     if not user_order:
@@ -510,7 +560,7 @@ class DatabaseService:
     # Log performance metrics
     load_time = time.time() - start_time
     if load_time > 0.1:  # Log slow requests
-      print(f'⚠️ Slow annotation trace load: {load_time:.3f}s for {len(result)} traces (user: {user_id[:8]}...)')
+      print(f'⚠️ Slow annotation trace load: {load_time:.3f}s for {len(result)} traces (user: {user_id[:8]}..., randomized)')
 
     return result
 
@@ -2364,11 +2414,32 @@ class DatabaseService:
     The phase stays as DISCOVERY but discovery_started is set to False,
     which causes the UI to show the Discovery Start Page.
     
+    IMPORTANT: This also clears all discovery-related data so participants start fresh:
+    - Discovery findings (participant responses)
+    - User trace orders (personalized trace lists)
+    - User discovery completions (who completed discovery)
+    
     Returns the updated workshop or None if not found.
     """
     workshop = self.db.query(WorkshopDB).filter(WorkshopDB.id == workshop_id).first()
     if not workshop:
       return None
+    
+    # Clear all discovery-related data so participants start fresh
+    # 1. Clear discovery findings (participant responses)
+    self.db.query(DiscoveryFindingDB).filter(
+      DiscoveryFindingDB.workshop_id == workshop_id
+    ).delete(synchronize_session=False)
+    
+    # 2. Clear user trace orders (personalized trace lists)
+    self.db.query(UserTraceOrderDB).filter(
+      UserTraceOrderDB.workshop_id == workshop_id
+    ).delete(synchronize_session=False)
+    
+    # 3. Clear user discovery completions (who completed discovery)
+    self.db.query(UserDiscoveryCompletionDB).filter(
+      UserDiscoveryCompletionDB.workshop_id == workshop_id
+    ).delete(synchronize_session=False)
     
     # Keep phase as DISCOVERY but mark discovery as NOT started
     # This causes the UI to show the Discovery Start Page

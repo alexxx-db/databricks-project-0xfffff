@@ -438,11 +438,24 @@ export const FacilitatorDashboard: React.FC<FacilitatorDashboardProps> = ({ onNa
         throw new Error(error.detail || 'Failed to reset discovery');
       }
 
-      // Invalidate caches
+      // Invalidate ALL discovery-related caches comprehensively
+      // This ensures participants see a fresh start
       queryClient.invalidateQueries({ queryKey: ['workshop', workshopId] });
-      queryClient.invalidateQueries({ queryKey: ['traces', workshopId] });
+      queryClient.invalidateQueries({ queryKey: ['all-traces', workshopId] });
+      queryClient.invalidateQueries({ queryKey: ['findings', workshopId] });
+      queryClient.invalidateQueries({ queryKey: ['user-findings', workshopId] });
+      queryClient.invalidateQueries({ queryKey: ['facilitator-findings-with-users', workshopId] });
       
-      toast.success('Discovery reset! Select your trace configuration.');
+      // Invalidate ALL trace queries for this workshop (including user-specific ones)
+      // The participant trace query key is ['traces', workshopId, userId]
+      queryClient.invalidateQueries({ 
+        predicate: (query) => {
+          const key = query.queryKey;
+          return Array.isArray(key) && key[0] === 'traces' && key[1] === workshopId;
+        }
+      });
+      
+      toast.success('Discovery reset! All participant progress cleared. Select your trace configuration.');
       
       // Force page reload to reflect phase change
       window.location.reload();

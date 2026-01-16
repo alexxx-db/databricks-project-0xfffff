@@ -131,6 +131,8 @@ class WorkshopDB(Base):
     annotation_started = Column(Boolean, default=False)
     active_discovery_trace_ids = Column(JSON, default=list)
     active_annotation_trace_ids = Column(JSON, default=list)
+    discovery_randomize_traces = Column(Boolean, default=False)  # Whether to randomize trace order in discovery
+    annotation_randomize_traces = Column(Boolean, default=False)  # Whether to randomize trace order in annotation
     judge_name = Column(String, default="workshop_judge")  # Name used for feedback entries
     created_at = Column(DateTime, default=func.now())
 

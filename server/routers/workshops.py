@@ -519,14 +519,18 @@ async def clear_rubric(workshop_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{workshop_id}/begin-discovery")
-async def begin_discovery_phase(workshop_id: str, trace_limit: Optional[int] = None, db: Session = Depends(get_db)):
+async def begin_discovery_phase(
+    workshop_id: str, 
+    trace_limit: Optional[int] = None, 
+    randomize: bool = False,
+    db: Session = Depends(get_db)
+):
     """Begin the discovery phase and distribute traces to participants.
-
-    Each user will see the same set of traces, but in a randomized order unique to them.
 
     Args:
         workshop_id: The workshop ID
         trace_limit: Optional limit on number of traces to use (default: all)
+        randomize: Whether to randomize trace order per user (default: False - same order for all)
         db: Database session
     """
 
@@ -538,6 +542,9 @@ async def begin_discovery_phase(workshop_id: str, trace_limit: Optional[int] = N
     # Update workshop phase to discovery and mark discovery as started
     db_service.update_workshop_phase(workshop_id, WorkshopPhase.DISCOVERY)
     db_service.update_phase_started(workshop_id, discovery_started=True)
+    
+    # Store the randomization setting
+    db_service.update_discovery_randomize_setting(workshop_id, randomize)
 
     # Get all traces
     traces = db_service.get_traces(workshop_id)
@@ -551,14 +558,13 @@ async def begin_discovery_phase(workshop_id: str, trace_limit: Optional[int] = N
         )
 
     print(
-        f"🔍 DEBUG begin_discovery: workshop_id={workshop_id}, trace_limit={trace_limit}, total_traces={total_traces}"
+        f"🔍 DEBUG begin_discovery: workshop_id={workshop_id}, trace_limit={trace_limit}, randomize={randomize}, total_traces={total_traces}"
     )
     print(f"🔍 DEBUG trace_ids: {[t.id for t in traces]}")
 
     # Apply trace limit - take first N traces in chronological order
-    # Note: Each user will see these traces in their own randomized order
     if trace_limit and trace_limit > 0 and trace_limit < total_traces:
-        print(f"🎯 DEBUG: Taking first {trace_limit} traces from {total_traces} (will be randomized per user)")
+        print(f"🎯 DEBUG: Taking first {trace_limit} traces from {total_traces}")
         # Take the first N traces in chronological order
         selected_traces = traces[: min(trace_limit, total_traces)]
         trace_ids_to_use = [trace.id for trace in selected_traces]
@@ -573,12 +579,14 @@ async def begin_discovery_phase(workshop_id: str, trace_limit: Optional[int] = N
     # Store the active discovery trace IDs in the workshop
     db_service.update_active_discovery_traces(workshop_id, trace_ids_to_use)
 
+    randomize_msg = "randomized per user" if randomize else "in chronological order"
     return {
-        "message": f"Discovery phase started with {traces_used} traces from {total_traces} total (each user will see traces in randomized order)",
+        "message": f"Discovery phase started with {traces_used} traces from {total_traces} total ({randomize_msg})",
         "phase": "discovery",
         "total_traces": total_traces,
         "traces_used": traces_used,
         "trace_limit": trace_limit,
+        "randomize": randomize,
     }
 
 
@@ -726,12 +734,21 @@ async def reorder_annotation_traces(workshop_id: str, db: Session = Depends(get_
 async def begin_annotation_phase(workshop_id: str, request: dict = {}, db: Session = Depends(get_db)):
     """Begin the annotation phase with a subset of traces.
 
-    Each user will see the same set of traces, but in a randomized order unique to them.
+    Args:
+        workshop_id: The workshop ID
+        request: JSON body with optional fields:
+            - trace_limit: Number of traces to use (default: 10, -1 for all)
+            - randomize: Whether to randomize trace order per user (default: False)
+    
+    When randomize=False (default): All SMEs see traces in the same chronological order.
+    When randomize=True: All SMEs see the same set of traces but in different random orders.
     """
     import random
 
     # Get the optional trace limit from request (default to 10)
     trace_limit = request.get("trace_limit", 10)
+    # Get the optional randomize flag (default to False - same order for all users)
+    randomize = request.get("randomize", False)
 
     db_service = DatabaseService(db)
     workshop = db_service.get_workshop(workshop_id)
@@ -755,28 +772,32 @@ async def begin_annotation_phase(workshop_id: str, request: dict = {}, db: Sessi
 
     # Determine how many traces to use
     if trace_limit == -1 or trace_limit >= total_traces:
-        # Use all traces
+        # Use all traces in chronological order
         trace_ids_to_use = [trace.id for trace in traces]
         traces_used = total_traces
     else:
-        # Sample a subset of traces
+        # Take first N traces (chronological order, not random sampling)
         traces_used = min(trace_limit, total_traces)
-        sampled_traces = random.sample(traces, traces_used)
-        trace_ids_to_use = [trace.id for trace in sampled_traces]
+        trace_ids_to_use = [trace.id for trace in traces[:traces_used]]
 
     # Store the active annotation trace IDs in the workshop
     db_service.update_active_annotation_traces(workshop_id, trace_ids_to_use)
+    
+    # Store the randomization setting
+    db_service.update_annotation_randomize_setting(workshop_id, randomize)
 
     # Update workshop phase to annotation and mark annotation as started
     db_service.update_workshop_phase(workshop_id, WorkshopPhase.ANNOTATION)
     db_service.update_phase_started(workshop_id, annotation_started=True)
 
+    randomize_msg = "randomized per SME" if randomize else "in chronological order"
     return {
-        "message": f"Annotation phase started with {traces_used} traces from {total_traces} total (each user will see traces in randomized order)",
+        "message": f"Annotation phase started with {traces_used} traces from {total_traces} total ({randomize_msg})",
         "phase": "annotation",
         "total_traces": total_traces,
         "traces_used": traces_used,
         "trace_limit": trace_limit,
+        "randomize": randomize,
     }
 
 
@@ -807,14 +828,20 @@ async def reset_discovery(workshop_id: str, db: Session = Depends(get_db)):
     """Reset a workshop back to before discovery phase started (facilitator only).
 
     This allows changing the discovery configuration (e.g., number of traces).
-    Traces are kept, but the phase is reset so discovery can be reconfigured.
+    
+    IMPORTANT: This clears ALL participant discovery progress:
+    - All discovery findings/responses submitted by participants
+    - All user trace orders (personalized trace lists)
+    - All user discovery completions
+    
+    Traces are kept, but participants will start fresh from the beginning.
     """
     db_service = DatabaseService(db)
     workshop = db_service.get_workshop(workshop_id)
     if not workshop:
         raise HTTPException(status_code=404, detail="Workshop not found")
 
-    # Reset workshop to pre-discovery state
+    # Reset workshop to pre-discovery state (clears all participant progress)
     updated_workshop = db_service.reset_workshop_to_discovery(workshop_id)
 
     if not updated_workshop:
@@ -823,7 +850,7 @@ async def reset_discovery(workshop_id: str, db: Session = Depends(get_db)):
     traces = db_service.get_traces(workshop_id)
 
     return {
-        "message": "Discovery reset. You can now select a different trace configuration.",
+        "message": "Discovery reset. All participant progress cleared. You can now select a different trace configuration.",
         "workshop_id": workshop_id,
         "current_phase": updated_workshop.current_phase,
         "discovery_started": updated_workshop.discovery_started,
