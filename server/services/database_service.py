@@ -580,7 +580,7 @@ class DatabaseService:
     import time
     
     finding_id = str(uuid.uuid4())
-    max_retries = 5  # Increased for better resilience
+    max_retries = 3
     base_delay = 0.2  # Base delay in seconds
     
     logger.info(f"📝 add_finding called: workshop_id={workshop_id}, trace_id={finding_data.trace_id}, user_id={finding_data.user_id}")
@@ -634,7 +634,7 @@ class DatabaseService:
         logger.warning(f"⚠️ IntegrityError on finding save (attempt {attempt + 1}/{max_retries}): {e}")
         self.db.rollback()
         if attempt < max_retries - 1:
-          delay = base_delay * (2 ** attempt)  # Exponential backoff: 0.2, 0.4, 0.8, 1.6, 3.2s
+          delay = base_delay * (2 ** attempt)  # Exponential backoff: 0.2, 0.4, 0.8s
           logger.info(f"🔄 Retrying in {delay:.1f}s...")
           time.sleep(delay)
           continue
@@ -1076,7 +1076,7 @@ class DatabaseService:
     from sqlalchemy.exc import IntegrityError, OperationalError
     import time
     
-    max_retries = 5  # Increased for better resilience
+    max_retries = 3
     base_delay = 0.2  # Base delay in seconds
     annotation_id = str(uuid.uuid4())
     
@@ -1167,7 +1167,7 @@ class DatabaseService:
         logger.warning(f"⚠️ IntegrityError on annotation save (attempt {attempt + 1}/{max_retries}): {e}")
         self.db.rollback()
         if attempt < max_retries - 1:
-          delay = base_delay * (2 ** attempt)  # Exponential backoff: 0.2, 0.4, 0.8, 1.6, 3.2s
+          delay = base_delay * (2 ** attempt)  # Exponential backoff: 0.2, 0.4, 0.8s
           logger.info(f"🔄 Retrying in {delay:.1f}s...")
           time.sleep(delay)
           continue
