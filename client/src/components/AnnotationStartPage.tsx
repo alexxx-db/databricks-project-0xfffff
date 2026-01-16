@@ -9,7 +9,8 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useWorkshopContext } from '@/context/WorkshopContext';
 import { useRubric, useAllTraces } from '@/hooks/useWorkshopApi';
 import { WorkshopsService } from '@/client';
-import { Play, Users, Star, ClipboardList, ChevronRight, CheckCircle, Settings, Database, Scale, Binary, MessageSquareText } from 'lucide-react';
+import { Play, Users, Star, ClipboardList, ChevronRight, CheckCircle, Settings, Database, Scale, Binary, MessageSquareText, Shuffle } from 'lucide-react';
+import { Switch } from '@/components/ui/switch';
 import { toast } from 'sonner';
 import { parseRubricQuestions } from '@/utils/rubricUtils';
 
@@ -23,6 +24,7 @@ export const AnnotationStartPage: React.FC<AnnotationStartPageProps> = ({ onStar
   const [isStarting, setIsStarting] = React.useState(false);
   const [traceOption, setTraceOption] = React.useState<'limited' | 'all'>('limited');
   const [customTraceCount, setCustomTraceCount] = React.useState<string>('10');
+  const [randomizeTraces, setRandomizeTraces] = React.useState<boolean>(false);
   const { data: rubric } = useRubric(workshopId!);
   const { data: traces } = useAllTraces(workshopId!);
   
@@ -40,7 +42,7 @@ export const AnnotationStartPage: React.FC<AnnotationStartPageProps> = ({ onStar
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ trace_limit: traceLimit })
+        body: JSON.stringify({ trace_limit: traceLimit, randomize: randomizeTraces })
       });
       
       if (!response.ok) {
@@ -210,13 +212,46 @@ export const AnnotationStartPage: React.FC<AnnotationStartPageProps> = ({ onStar
             </div>
           </RadioGroup>
           
+          {/* Randomization Toggle */}
+          <div className="mt-6 pt-4 border-t border-amber-200">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <Shuffle className="w-5 h-5 text-amber-600" />
+                <div>
+                  <Label htmlFor="annotation-randomize-toggle" className="font-medium cursor-pointer">
+                    Randomize Trace Order
+                  </Label>
+                  <div className="text-sm text-slate-600">
+                    Each SME sees traces in a different random order
+                  </div>
+                </div>
+              </div>
+              <Switch
+                id="annotation-randomize-toggle"
+                checked={randomizeTraces}
+                onCheckedChange={setRandomizeTraces}
+              />
+            </div>
+            {!randomizeTraces && (
+              <div className="text-xs text-slate-500 mt-2 ml-8">
+                Default: All SMEs will see traces in the same chronological order
+              </div>
+            )}
+            {randomizeTraces && (
+              <div className="text-xs text-amber-700 mt-2 ml-8">
+                ✓ Randomization enabled: Each SME will see traces in their own unique order
+              </div>
+            )}
+          </div>
+
           <div className="mt-4 p-3 bg-purple-100 rounded-lg">
             <p className="text-sm text-purple-800">
               <strong>Selected:</strong> {
                 traceOption === 'all' 
                   ? `All ${totalTraces} traces`
-                  : `${Math.min(parseInt(customTraceCount) || 10, totalTraces)} traces (randomly sampled)`
+                  : `${Math.min(parseInt(customTraceCount) || 10, totalTraces)} traces`
               }
+              {randomizeTraces && ' (randomized per SME)'}
             </p>
           </div>
         </CardContent>
