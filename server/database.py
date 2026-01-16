@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    event,
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
@@ -51,6 +52,23 @@ engine = create_engine(
     pool_pre_ping=True,  # Verify connections before use
     echo=False,  # Set to True for SQL debugging
 )
+
+
+# CRITICAL: Enable WAL mode and set busy_timeout for EVERY new SQLite connection
+# This is essential for proper concurrent write handling
+# Without this, multiple users submitting feedback simultaneously can lose data
+if 'sqlite' in DATABASE_URL:
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        """Set SQLite PRAGMAs on every new connection for proper concurrency."""
+        cursor = dbapi_connection.cursor()
+        # WAL mode: Allows concurrent reads during writes (critical for multi-user apps)
+        cursor.execute("PRAGMA journal_mode=WAL")
+        # Busy timeout: Wait up to 60 seconds if database is locked before failing
+        cursor.execute("PRAGMA busy_timeout=60000")
+        # Synchronous NORMAL: Good balance of safety and performance with WAL
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.close()
 
 # Create session factory with better session management
 SessionLocal = sessionmaker(
