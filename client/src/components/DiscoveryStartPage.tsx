@@ -210,35 +210,16 @@ export const DiscoveryStartPage: React.FC<DiscoveryStartPageProps> = ({ onStartD
           )}
 
           {/* Randomization Toggle */}
-          <div className="mt-6 pt-4 border-t border-amber-200">
-            <div className="flex items-center justify-between p-3 rounded-lg bg-white/50">
-              <div className="flex items-center gap-3">
-                <Shuffle className="w-5 h-5 text-amber-600" />
-                <div>
-                  <Label htmlFor="randomize-toggle" className="font-medium cursor-pointer">
-                    Randomize Trace Order
-                  </Label>
-                  <div className="text-sm text-slate-600">
-                    Each participant sees traces in a different random order
-                  </div>
-                </div>
-              </div>
-              <Switch
-                id="randomize-toggle"
-                checked={randomizeTraces}
-                onCheckedChange={setRandomizeTraces}
-              />
-            </div>
-            {!randomizeTraces && (
-              <div className="text-xs text-slate-500 mt-2 ml-8">
-                Default: All participants will see traces in the same chronological order
-              </div>
-            )}
-            {randomizeTraces && (
-              <div className="text-xs text-amber-700 mt-2 ml-8">
-                ✓ Randomization enabled: Each user will see traces in their own unique order
-              </div>
-            )}
+          <div className="mt-4 pt-3 border-t border-amber-200 flex items-center justify-between">
+            <Label htmlFor="randomize-toggle" className="text-sm text-slate-600 cursor-pointer flex items-center gap-2">
+              <Shuffle className="w-4 h-4 text-amber-600" />
+              Randomize trace order
+            </Label>
+            <Switch
+              id="randomize-toggle"
+              checked={randomizeTraces}
+              onCheckedChange={setRandomizeTraces}
+            />
           </div>
 
           {/* Show current selection info */}

@@ -170,6 +170,7 @@ class AlignmentRequest(BaseModel):
     evaluation_model_name: str  # Model for evaluate() job
     alignment_model_name: Optional[str] = None  # Model for SIMBA optimizer (judge_model_uri), required for alignment
     prompt_id: Optional[str] = None  # Existing prompt ID to update (instead of creating a new one)
+    judge_type: Optional[str] = None  # Explicit judge type: 'likert', 'binary', 'freeform'
 
 
 
@@ -178,6 +179,7 @@ class SimpleEvaluationRequest(BaseModel):
   judge_prompt: str
   endpoint_name: str  # Databricks model serving endpoint name
   prompt_id: Optional[str] = None  # Existing prompt ID to update
+  judge_type: Optional[str] = None  # Explicit judge type: 'likert', 'binary', 'freeform'
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -880,6 +882,39 @@ async def reset_discovery(workshop_id: str, db: Session = Depends(get_db)):
         "workshop_id": workshop_id,
         "current_phase": updated_workshop.current_phase,
         "discovery_started": updated_workshop.discovery_started,
+        "traces_available": len(traces),
+    }
+
+
+@router.post("/{workshop_id}/reset-annotation")
+async def reset_annotation(workshop_id: str, db: Session = Depends(get_db)):
+    """Reset a workshop back to before annotation phase started (facilitator only).
+
+    This allows changing the annotation configuration (e.g., trace selection, randomization).
+    
+    IMPORTANT: This clears ALL SME annotation progress:
+    - All annotations submitted by SMEs
+    
+    Traces are kept, but SMEs will start fresh from the beginning.
+    """
+    db_service = DatabaseService(db)
+    workshop = db_service.get_workshop(workshop_id)
+    if not workshop:
+        raise HTTPException(status_code=404, detail="Workshop not found")
+
+    # Reset workshop to pre-annotation state (clears all SME progress)
+    updated_workshop = db_service.reset_workshop_to_annotation(workshop_id)
+
+    if not updated_workshop:
+        raise HTTPException(status_code=500, detail="Failed to reset workshop")
+
+    traces = db_service.get_traces(workshop_id)
+
+    return {
+        "message": "Annotation reset. All SME progress cleared. You can now select a different trace configuration.",
+        "workshop_id": workshop_id,
+        "current_phase": updated_workshop.current_phase,
+        "annotation_started": updated_workshop.annotation_started,
         "traces_available": len(traces),
     }
 
@@ -2636,6 +2671,7 @@ async def start_evaluation_job(
                     judge_prompt=request.judge_prompt,
                     evaluation_model_name=request.evaluation_model_name,
                     mlflow_config=mlflow_config,
+                    judge_type=request.judge_type,  # Pass explicit judge type from selected rubric question
                 ):
                     if isinstance(message, dict):
                         # This is the final result

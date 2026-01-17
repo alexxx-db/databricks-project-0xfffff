@@ -679,6 +679,7 @@ class AlignmentService:
         judge_prompt: str,
         evaluation_model_name: str,
         mlflow_config: Any,
+        judge_type: str = None,  # Explicit judge type from selected rubric question
     ) -> Generator[str, None, Dict[str, Any]]:
         """Run evaluation using mlflow.genai.evaluate() with answer sheet approach.
         
@@ -686,6 +687,10 @@ class AlignmentService:
         
         Critical: The judge_name must match for both human feedback and LLM evaluation
         so that align() can properly correlate them.
+        
+        Args:
+            judge_type: Explicit judge type ('likert', 'binary', 'freeform'). If not provided,
+                       falls back to detecting from rubric (legacy behavior).
         """
         # Stream connection is established by router's immediate "Establishing Connection" message
         logger.info("Evaluation generator started for judge '%s'", judge_name)
@@ -798,14 +803,15 @@ class AlignmentService:
             # Create the judge using mlflow.genai.judges.make_judge
             from mlflow.genai.judges import make_judge
             
-            # Get judge type from rubric FIRST to enhance prompt if needed
-            judge_type = get_judge_type_from_rubric(self.db_service, workshop_id)
+            # Use explicit judge type if provided, otherwise detect from rubric (legacy)
+            effective_judge_type = judge_type if judge_type else get_judge_type_from_rubric(self.db_service, workshop_id)
+            yield f"Using judge type: {effective_judge_type}" + (f" (explicitly set)" if judge_type else " (detected from rubric)")
             
             # The prompt template with placeholders for judge instructions
             mlflow_prompt_template = self._normalize_judge_prompt(judge_prompt)
             
             # For binary rubrics, enhance the prompt to explicitly require 0/1 numeric values
-            if judge_type == 'binary':
+            if effective_judge_type == 'binary':
                 # Check if prompt already has 0/1 numeric instructions
                 prompt_lower = mlflow_prompt_template.lower()
                 has_numeric_instructions = any(phrase in prompt_lower for phrase in [
@@ -844,12 +850,12 @@ Now evaluate the following:
             # - Binary judges: use float for 0/1 numeric ratings (NOT bool - bool is unreliable)
             # - Likert judges: use float for 1-5 scale
             # NOTE: feedback_value_type only affects parsing, not model output. Strong prompt instructions are critical.
-            if judge_type == 'binary':
+            if effective_judge_type == 'binary':
                 feedback_type = float  # Use float, not bool - more reliable for 0/1 parsing
-                yield f"Detected binary rubric - creating judge with feedback_value_type=float (expecting 0 or 1)"
+                yield f"Binary judge - creating with feedback_value_type=float (expecting 0 or 1)"
             else:
                 feedback_type = float
-                yield f"Detected Likert rubric - creating judge with feedback_value_type=float (expecting 1-5)"
+                yield f"Likert judge - creating with feedback_value_type=float (expecting 1-5)"
             
             # Create judge with the judge name - this name is critical for alignment
             # The judge can be used as a scorer in evaluate()
@@ -963,12 +969,11 @@ Now evaluate the following:
                     rows_without_trace_id = 0
                     skipped_unknown_traces = 0
                     
-                    # Get judge type early to properly convert PASS/FAIL for binary rubrics
-                    early_judge_type = get_judge_type_from_rubric(self.db_service, workshop_id)
-                    is_binary = early_judge_type == 'binary'
-                    yield f"🔍 Judge type detection: judge_type='{early_judge_type}', is_binary={is_binary}"
+                    # Use the effective judge type determined earlier (explicit > detected)
+                    is_binary = effective_judge_type == 'binary'
+                    yield f"🔍 Processing results with judge_type='{effective_judge_type}', is_binary={is_binary}"
                     if is_binary:
-                        yield f"Detected binary rubric - will convert PASS/FAIL to 1/0 and reject any values not 0 or 1"
+                        yield f"Binary judge - will convert PASS/FAIL to 1/0 and reject any values not 0 or 1"
                     
                     for idx, (_, row) in enumerate(result_df.iterrows()):
                         raw_trace_id = row.get('trace_id')
@@ -1191,19 +1196,18 @@ Now evaluate the following:
             else:
                 yield f"WARNING: Result DataFrame is None"
             
-            # Get judge type for appropriate metrics calculation
-            judge_type = get_judge_type_from_rubric(self.db_service, workshop_id)
-            yield f"Computing metrics for judge type: {judge_type}"
+            # Use effective_judge_type for appropriate metrics calculation
+            yield f"Computing metrics for judge type: {effective_judge_type}"
             
             # Extract results with appropriate metrics for judge type
-            metrics_payload = self._calculate_eval_metrics(evaluations, judge_type=judge_type)
+            metrics_payload = self._calculate_eval_metrics(evaluations, judge_type=effective_judge_type)
             evaluation_results = {
                 'judge_name': judge_name,
                 'trace_count': len(trace_ids_for_eval),
                 'metrics': metrics_payload,
                 'evaluations': evaluations,
                 'success': True,
-                'judge_type': judge_type,
+                'judge_type': effective_judge_type,
             }
             
             yield f"Evaluation results prepared for {len(evaluations)} traces"
