@@ -18,8 +18,17 @@ export const ProductionLogin: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [workshops, setWorkshops] = useState<Workshop[]>([]);
   const [isLoadingWorkshops, setIsLoadingWorkshops] = useState(true);
-  const [selectedWorkshopId, setSelectedWorkshopId] = useState<string>(workshopId || '');
+  const [selectedWorkshopId, setSelectedWorkshopId] = useState<string>('');
   const [createNewWorkshop, setCreateNewWorkshop] = useState(false);
+
+  // Clear URL parameter on login page - users will select their workshop
+  useEffect(() => {
+    if (window.location.search.includes('workshop=')) {
+      window.history.replaceState({}, '', '/');
+      setWorkshopId(null);
+      localStorage.removeItem('workshop_id');
+    }
+  }, [setWorkshopId]);
 
   // Fetch available workshops on mount (only once)
   useEffect(() => {
@@ -36,21 +45,8 @@ export const ProductionLogin: React.FC = () => {
           console.log('[ProductionLogin] Fetched workshops:', data.length, data);
           setWorkshops(data);
           
-          // Check if current workshopId from URL is valid
-          const validWorkshopIds = data.map((w: Workshop) => w.id);
-          if (workshopId && validWorkshopIds.includes(workshopId)) {
-            // URL has a valid workshop ID, pre-select it
-            setSelectedWorkshopId(workshopId);
-          } else if (workshopId && !validWorkshopIds.includes(workshopId)) {
-            // URL has an INVALID workshop ID - clear it
-            console.log('[ProductionLogin] Invalid workshop ID in URL, clearing:', workshopId);
-            setWorkshopId(null);
-            localStorage.removeItem('workshop_id');
-            window.history.replaceState({}, '', '/');
-          }
-          
-          // If there's only one workshop and nothing selected, auto-select it
-          if (data.length === 1 && !selectedWorkshopId) {
+          // If there's only one workshop, auto-select it
+          if (data.length === 1) {
             setSelectedWorkshopId(data[0].id);
           }
           // If no workshops exist, auto-select "Create New" for facilitators
