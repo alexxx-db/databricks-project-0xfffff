@@ -2596,3 +2596,57 @@ class DatabaseService:
       active_annotation_trace_ids=workshop.active_annotation_trace_ids or [],
       created_at=workshop.created_at,
     )
+
+  def reset_workshop_to_annotation(self, workshop_id: str) -> Optional[Workshop]:
+    """Reset a workshop back to the annotation start page (before annotation was started).
+    
+    This allows changing the annotation configuration (e.g., trace selection, randomization).
+    The phase stays as ANNOTATION but annotation_started is set to False,
+    which causes the UI to show the Annotation Start Page.
+    
+    IMPORTANT: This clears all annotation-related data so SMEs start fresh:
+    - All annotations submitted by SMEs
+    
+    Traces are kept, but SMEs will start fresh from the beginning.
+    
+    Returns the updated workshop or None if not found.
+    """
+    workshop = self.db.query(WorkshopDB).filter(WorkshopDB.id == workshop_id).first()
+    if not workshop:
+      return None
+    
+    # Clear all annotation-related data so SMEs start fresh
+    # Clear annotations submitted by SMEs
+    self.db.query(AnnotationDB).filter(
+      AnnotationDB.workshop_id == workshop_id
+    ).delete(synchronize_session=False)
+    
+    # Keep phase as ANNOTATION but mark annotation as NOT started
+    # This causes the UI to show the Annotation Start Page
+    workshop.current_phase = WorkshopPhase.ANNOTATION
+    workshop.annotation_started = False
+    
+    # Keep completed phases up to discovery (annotation not yet complete)
+    completed = workshop.completed_phases or []
+    workshop.completed_phases = [p for p in completed if p in ['intake', 'discovery']]
+    
+    # Clear active annotation trace list so new selection can be made
+    workshop.active_annotation_trace_ids = None
+    
+    self.db.commit()
+    self.db.refresh(workshop)
+    
+    return Workshop(
+      id=workshop.id,
+      name=workshop.name,
+      description=workshop.description,
+      facilitator_id=workshop.facilitator_id,
+      status=workshop.status,
+      current_phase=workshop.current_phase,
+      completed_phases=workshop.completed_phases or [],
+      discovery_started=workshop.discovery_started or False,
+      annotation_started=workshop.annotation_started or False,
+      active_discovery_trace_ids=workshop.active_discovery_trace_ids or [],
+      active_annotation_trace_ids=workshop.active_annotation_trace_ids or [],
+      created_at=workshop.created_at,
+    )

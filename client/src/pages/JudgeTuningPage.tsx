@@ -69,12 +69,17 @@ export function JudgeTuningPage() {
   const [rubric, setRubric] = useState<Rubric | null>(null);
   const [mlflowConfig, setMlflowConfig] = useState<any>(null);
   
-  // Judge type - derived from the first rubric question (set during rubric creation)
-  // Parse the rubric to get the actual judge type from questions
+  // Selected rubric question index for tuning
+  const [selectedQuestionIndex, setSelectedQuestionIndex] = useState<number>(0);
+  
+  // Parse rubric questions
   const parsedRubricQuestions = rubric?.question ? parseRubricQuestions(rubric.question) : [];
-  const judgeType: JudgeType = parsedRubricQuestions.length > 0 
-    ? parsedRubricQuestions[0].judgeType 
-    : (rubric?.judge_type || 'likert');
+  
+  // Get currently selected question
+  const selectedQuestion = parsedRubricQuestions[selectedQuestionIndex] || parsedRubricQuestions[0];
+  
+  // Judge type - derived from the selected rubric question
+  const judgeType: JudgeType = selectedQuestion?.judgeType || (rubric?.judge_type || 'likert');
   const binaryLabels: Record<string, string> = rubric?.binary_labels || { pass: 'Pass', fail: 'Fail' };
   
   // Track if current prompt differs from saved version
@@ -108,26 +113,23 @@ export function JudgeTuningPage() {
   const [evaluationMode, setEvaluationMode] = useState<'mlflow' | 'simple'>('mlflow');
   const [simpleEndpointName, setSimpleEndpointName] = useState<string>('databricks-claude-sonnet-4-5');
   
-  // Judge name derivation logic
+  // Judge name derivation logic - based on selected question
   const judgeName = useMemo(() => {
-    // If saved name exists and is not default, use it
+    // Derive from selected rubric question
+    if (selectedQuestion?.title) {
+      const title = selectedQuestion.title;
+      const snakeCase = title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+      return `${snakeCase}_judge`;
+    }
+    
+    // If saved name exists and is not default, use it as fallback
     if (workshop?.judge_name && workshop.judge_name !== 'workshop_judge') {
       return workshop.judge_name;
     }
     
-    // Otherwise try to derive from rubric
-    if (rubric?.question) {
-      const questions = parseRubricQuestions(rubric.question);
-      if (questions.length > 0 && questions[0].title) {
-        const title = questions[0].title;
-        const snakeCase = title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
-        return `${snakeCase}_judge`;
-      }
-    }
-    
     // Fallback to default
     return 'workshop_judge';
-  }, [workshop?.judge_name, rubric?.question]);
+  }, [selectedQuestion?.title, workshop?.judge_name]);
 
   const logsStorageKey = useMemo(
     () => (workshopId ? `judge-alignment-logs-${workshopId}` : 'judge-alignment-logs'),
@@ -168,13 +170,33 @@ export function JudgeTuningPage() {
 
   const annotatedTraceCount = useMemo(() => {
     if (!annotations?.length) return 0;
+    
+    // Count traces that have ratings for the selected question
     const traceIds = new Set(
       annotations
-        .filter((ann) => ann.rating !== null && ann.rating !== undefined)
+        .filter((ann) => {
+          // Check if annotation has rating for selected question
+          if (selectedQuestion && ann.ratings && typeof ann.ratings === 'object') {
+            // Try exact question ID match
+            if (ann.ratings[selectedQuestion.id] !== undefined && ann.ratings[selectedQuestion.id] !== null) {
+              return true;
+            }
+            // Try index-based key format
+            const indexBasedKey = Object.keys(ann.ratings).find(k => k.endsWith(`_${selectedQuestionIndex}`));
+            if (indexBasedKey && ann.ratings[indexBasedKey] !== undefined && ann.ratings[indexBasedKey] !== null) {
+              return true;
+            }
+          }
+          // Fallback to legacy rating for first question only
+          if (selectedQuestionIndex === 0 && ann.rating !== null && ann.rating !== undefined) {
+            return true;
+          }
+          return false;
+        })
         .map((ann) => ann.trace_id)
     );
     return traceIds.size;
-  }, [annotations]);
+  }, [annotations, selectedQuestion, selectedQuestionIndex]);
 
   const ensurePromptHasPlaceholders = (prompt: string) => {
     let normalized = prompt || '';
@@ -189,44 +211,94 @@ export function JudgeTuningPage() {
     return normalized;
   };
 
-  // Load default prompt template based on judge type from rubric (only when no prompts exist)
+  // Track previous question index to detect actual changes (not initial mount)
+  const prevQuestionIndexRef = React.useRef<number | null>(null);
+  
+  // Reset prompt when switching questions (not on initial mount)
   useEffect(() => {
-    if (rubric?.judge_type && !currentPrompt.trim() && !prompts.length) {
-      // Set default template when rubric is loaded and no prompt exists
-      const parsedQuestions = parseRubricQuestions(rubric.question);
-      const currentRubricJudgeType = parsedQuestions.length > 0 
-        ? parsedQuestions[0].judgeType 
-        : (rubric?.judge_type || 'likert');
-      setCurrentPrompt(defaultPromptTemplates[currentRubricJudgeType]);
-      setOriginalPromptText(defaultPromptTemplates[currentRubricJudgeType]);
+    // Skip on initial mount
+    if (prevQuestionIndexRef.current === null) {
+      prevQuestionIndexRef.current = selectedQuestionIndex;
+      return;
     }
-  }, [rubric?.question, rubric?.judge_type, prompts.length]);
+    
+    // Only reset if question actually changed
+    if (prevQuestionIndexRef.current !== selectedQuestionIndex && selectedQuestion) {
+      const questionJudgeType = selectedQuestion.judgeType || 'likert';
+      const template = defaultPromptTemplates[questionJudgeType];
+      
+      let customizedTemplate = template;
+      if (selectedQuestion.description) {
+        customizedTemplate = template
+          .replace('{rubric}', selectedQuestion.description)
+          .replace('{criteria}', selectedQuestion.description)
+          .replace('{focus}', selectedQuestion.description);
+      }
+      
+      setCurrentPrompt(customizedTemplate);
+      setOriginalPromptText(customizedTemplate);
+      setSelectedPromptId(null);
+      
+      // Load saved evaluations for this specific question if available
+      if (workshopId) {
+        const questionKey = `judge-evaluations-${workshopId}-q${selectedQuestionIndex}`;
+        const storedData = localStorage.getItem(questionKey);
+        if (storedData) {
+          try {
+            const parsed = JSON.parse(storedData);
+            // Only load if data is less than 24 hours old
+            if (Date.now() - parsed.timestamp < 24 * 60 * 60 * 1000) {
+              setEvaluations(parsed.evaluations || []);
+              setMetrics(parsed.metrics || null);
+              setHasEvaluated(parsed.evaluations && parsed.evaluations.length > 0);
+              setEvaluationComplete(parsed.evaluations && parsed.evaluations.length >= 10);
+              prevQuestionIndexRef.current = selectedQuestionIndex;
+              return; // Don't reset - we loaded saved data
+            }
+          } catch (error) {
+            // Failed to load saved evaluations
+          }
+        }
+      }
+      
+      // No saved data - reset evaluation state
+      setHasEvaluated(false);
+      setEvaluationComplete(false);
+      setMetrics(null);
+      setEvaluations([]);
+      
+      prevQuestionIndexRef.current = selectedQuestionIndex;
+    }
+  }, [selectedQuestionIndex, selectedQuestion, workshopId]);
 
   // Load initial data
   useEffect(() => {
     if (workshopId) {
       loadInitialData();
-      
-      // Load evaluations from local storage if available
-      const storageKey = `judge-evaluations-${workshopId}`;
-      const storedData = localStorage.getItem(storageKey);
+    }
+  }, [workshopId]);
+
+  // Load saved evaluations for the current question on mount and when question changes
+  useEffect(() => {
+    if (workshopId && selectedQuestionIndex !== undefined) {
+      const questionKey = `judge-evaluations-${workshopId}-q${selectedQuestionIndex}`;
+      const storedData = localStorage.getItem(questionKey);
       if (storedData) {
         try {
           const parsed = JSON.parse(storedData);
-          // Only load if data is less than 1 hour old
-          if (Date.now() - parsed.timestamp < 60 * 60 * 1000) {
-            setEvaluations(parsed.evaluations);
-            setMetrics(parsed.metrics);
-            setHasEvaluated(true);
-          } else {
-            localStorage.removeItem(storageKey);
+          // Only load if data is less than 24 hours old
+          if (Date.now() - parsed.timestamp < 24 * 60 * 60 * 1000) {
+            setEvaluations(parsed.evaluations || []);
+            setMetrics(parsed.metrics || null);
+            setHasEvaluated(parsed.evaluations && parsed.evaluations.length > 0);
+            setEvaluationComplete(parsed.evaluations && parsed.evaluations.length >= 10);
           }
         } catch (error) {
-          localStorage.removeItem(storageKey);
+          // Failed to load saved evaluations
         }
       }
     }
-  }, [workshopId]);
+  }, [workshopId]); // Only run on mount, not on question change (that's handled by the other useEffect)
 
   // Refetch annotations when page becomes visible (user navigates back)
   useEffect(() => {
@@ -315,7 +387,7 @@ export function JudgeTuningPage() {
       
       // Initialize with rubric question if no prompts exist
       if (promptsData.length === 0 && rubricData) {
-        const defaultPrompt = createDefaultPrompt(rubricData.question);
+        const defaultPrompt = createDefaultPrompt(rubricData.question, selectedQuestionIndex);
         setCurrentPrompt(defaultPrompt);
         setOriginalPromptText(defaultPrompt); // Track original for new prompt
         
@@ -329,13 +401,11 @@ export function JudgeTuningPage() {
         // Select the latest prompt (first in array since ordered by version desc)
         const latestPrompt = promptsData[0];
         
-        // Check if prompt judge_type matches current rubric judge_type
+        // Check if prompt judge_type matches current rubric question's judge_type
         // If rubric changed (e.g., from Likert to Binary), update prompt template
-        const currentRubricJudgeType = rubricData 
-          ? (parseRubricQuestions(rubricData.question).length > 0
-              ? parseRubricQuestions(rubricData.question)[0].judgeType
-              : (rubricData.judge_type || 'likert'))
-          : 'likert';
+        const parsedQuestions = parseRubricQuestions(rubricData?.question || '');
+        const selectedQ = parsedQuestions[selectedQuestionIndex] || parsedQuestions[0];
+        const currentRubricJudgeType = selectedQ?.judgeType || (rubricData?.judge_type || 'likert');
         
         // Check both the metadata judge_type AND the actual prompt content
         const promptMetadataJudgeType = latestPrompt.judge_type || 'likert';
@@ -349,7 +419,7 @@ export function JudgeTuningPage() {
         
         if (needsRegeneration) {
           console.log(`Prompt mismatch detected - rubric: ${currentRubricJudgeType}, metadata: ${promptMetadataJudgeType}, content: ${promptContentJudgeType}. Regenerating...`);
-          const updatedPrompt = createDefaultPrompt(rubricData.question);
+          const updatedPrompt = createDefaultPrompt(rubricData.question, selectedQuestionIndex);
           setCurrentPrompt(updatedPrompt);
           setOriginalPromptText(updatedPrompt);
           // Mark as modified so user knows it needs to be saved
@@ -412,17 +482,18 @@ export function JudgeTuningPage() {
     return 'likert'; // default
   };
 
-  const createDefaultPrompt = (rubricQuestion: string) => {
+  const createDefaultPrompt = (rubricQuestion: string, questionIndex: number = 0) => {
     // Parse the rubric to get clean question text (removes |||JUDGE_TYPE||| and |||QUESTION_SEPARATOR||| metadata)
     const parsedQuestions = parseRubricQuestions(rubricQuestion);
-    const firstQuestion = parsedQuestions.length > 0 
-      ? `${parsedQuestions[0].title}: ${parsedQuestions[0].description}` 
+    const targetQuestion = parsedQuestions[questionIndex] || parsedQuestions[0];
+    const questionText = targetQuestion 
+      ? `${targetQuestion.title}: ${targetQuestion.description}` 
       : rubricQuestion;
-    const judgeType = parsedQuestions.length > 0 ? parsedQuestions[0].judgeType : 'likert';
+    const judgeType = targetQuestion?.judgeType || 'likert';
     
     // Return different prompt templates based on judge type
     if (judgeType === 'binary') {
-      return `You are an expert evaluator. Please evaluate the following response based on this criteria: "${firstQuestion}"
+      return `You are an expert evaluator. Please evaluate the following response based on this criteria: "${questionText}"
 
 Rate the response on a scale of 0-1, where:
 
@@ -442,7 +513,7 @@ The response meets the criteria because...`;
     }
     
     if (judgeType === 'freeform') {
-      return `You are an expert evaluator. Please evaluate the following response based on this criteria: "${firstQuestion}"
+      return `You are an expert evaluator. Please evaluate the following response based on this criteria: "${questionText}"
 
 Provide detailed qualitative feedback on how well the response addresses this criteria.
 
@@ -459,7 +530,7 @@ Provide your analysis as a structured response with:
     }
     
     // Default: Likert scale (1-5)
-    return `You are an expert evaluator. Please evaluate the following response based on this criteria: "${firstQuestion}"
+    return `You are an expert evaluator. Please evaluate the following response based on this criteria: "${questionText}"
 
 Rate the response on a scale of 1-5, where:
 - 1 = Poor (does not meet criteria)
@@ -683,10 +754,10 @@ The response partially meets the criteria because...`;
       toast.error('No rubric question available');
       return;
     }
-    const defaultPrompt = createDefaultPrompt(rubric.question);
+    const defaultPrompt = createDefaultPrompt(rubric.question, selectedQuestionIndex);
     setCurrentPrompt(defaultPrompt);
     setIsModified(true);
-    toast.success(`Prompt reset to ${judgeType === 'likert' ? 'Likert (1-5)' : judgeType === 'binary' ? 'Binary (0-1)' : 'Free-form'} template`);
+    toast.success(`Prompt reset to ${judgeType === 'likert' ? 'Likert (1-5)' : judgeType === 'binary' ? 'Binary (0-1)' : 'Free-form'} template for "${selectedQuestion?.title}"`);
   };
 
   const handleEvaluatePrompt = async () => {
@@ -752,6 +823,7 @@ The response partially meets the criteria because...`;
             judge_prompt: normalizedPrompt,
             endpoint_name: simpleEndpointName,
             prompt_id: selectedPromptId || undefined,
+            judge_type: judgeType, // Pass the selected question's judge type
           }
         : {
             judge_name: judgeName,
@@ -759,6 +831,7 @@ The response partially meets the criteria because...`;
             evaluation_model_name: getBackendModelName(selectedEvaluationModel),
             alignment_model_name: getBackendModelName(selectedAlignmentModel),
             prompt_id: selectedPromptId || undefined,
+            judge_type: judgeType, // Pass the selected question's judge type
           };
 
       console.log(`[EVAL] Starting ${evaluationMode} evaluation with polling approach...`);
@@ -821,12 +894,13 @@ The response partially meets the criteria because...`;
                 setOriginalPromptText(currentPrompt); // It's now saved, so not modified
                 setIsModified(false);
                 
-                // Explicitly load the persisted evaluations for this new version
-                // This ensures consistency with what will be loaded on refresh
-                loadEvaluations(status.result.saved_prompt_id);
+                // Note: We already have evaluations from status.result.evaluations
+                // Don't reload from DB immediately as it may not be committed yet
+                // The evaluations will be loaded correctly on page refresh if needed
               }
 
-              const storageKey = `judge-evaluations-${workshopId}`;
+              // Save evaluations with question-specific key so they persist when switching judges
+              const storageKey = `judge-evaluations-${workshopId}-q${selectedQuestionIndex}`;
               localStorage.setItem(storageKey, JSON.stringify({
                 evaluations: status.result.evaluations || [],
                 metrics: status.result.metrics || null,
@@ -1133,25 +1207,37 @@ The response partially meets the criteria because...`;
         </Alert>
       )}
 
-      {/* Judge Type Display (set during Rubric Creation) */}
-      <Card className="mb-6">
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2">
-            <Brain className="h-5 w-5" />
-            Judge Type
-            <Badge variant="outline" className="ml-2">
-              {judgeType === 'likert' && 'Likert Scale'}
-              {judgeType === 'binary' && 'Binary'}
-              {judgeType === 'freeform' && 'Free-form'}
-            </Badge>
-          </CardTitle>
-          <CardDescription>
-            {judgeType === 'likert' && '1-5 Likert scale scoring with rubric criteria. Set during Rubric Creation phase.'}
-            {judgeType === 'binary' && `Binary ${binaryLabels.pass}/${binaryLabels.fail} evaluation. Set during Rubric Creation phase.`}
-            {judgeType === 'freeform' && 'Free-form qualitative feedback. Set during Rubric Creation phase.'}
-          </CardDescription>
-        </CardHeader>
-      </Card>
+      {/* Rubric Question Selector */}
+      {parsedRubricQuestions.length > 1 && (
+        <div className="mb-6">
+          <label className="text-sm font-medium text-gray-700 mb-2 block">
+            Select Judge to Tune ({parsedRubricQuestions.length} available)
+          </label>
+          <Select 
+            value={String(selectedQuestionIndex)}
+            onValueChange={(value) => setSelectedQuestionIndex(Number(value))}
+          >
+            <SelectTrigger className="w-full max-w-md bg-white">
+              <SelectValue placeholder="Select a judge" />
+            </SelectTrigger>
+            <SelectContent>
+              {parsedRubricQuestions.map((question, index) => (
+                <SelectItem key={question.id || index} value={String(index)}>
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">{index + 1}. {question.title}</span>
+                    <Badge variant="outline" className="text-xs">
+                      {question.judgeType === 'likert' && 'Likert'}
+                      {question.judgeType === 'binary' && 'Binary'}
+                      {question.judgeType === 'freeform' && 'Free-form'}
+                    </Badge>
+                  </div>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left Column - Prompt Editor (1/3) */}
@@ -1463,61 +1549,53 @@ The response partially meets the criteria because...`;
                         const paginatedTraces = annotatedTraces.slice(startIndex, endIndex);
                         
                         return paginatedTraces.map((trace: any, index: number) => {
-                          // Find annotations for this trace and calculate aggregated rating
+                          // Find annotations for this trace and get rating for SELECTED question only
                           const traceAnnotations = annotations.filter(a => a.trace_id === trace.id);
                           
                           let humanRating: number | null = null;
-                          if (traceAnnotations.length > 0) {
-                            // Get question IDs from rubric
-                            const questionIds = parsedRubricQuestions.map(q => q.id);
+                          if (traceAnnotations.length > 0 && selectedQuestion) {
+                            // Get the selected question ID to filter ratings
+                            const selectedQuestionId = selectedQuestion.id;
                             
-                            // Collect all ratings from annotations
+                            // Collect ratings ONLY for the selected question from all annotators
                             const allRatings: number[] = [];
                             
                             for (const ann of traceAnnotations) {
                               let foundRating = false;
                               
-                              // First, try to get rating from per-question ratings field
-                              if (ann.ratings && typeof ann.ratings === 'object' && questionIds.length > 0) {
-                                // Try each question ID
-                                for (const qId of questionIds) {
-                                  const ratingValue = ann.ratings[qId];
-                                  if (ratingValue !== undefined && ratingValue !== null && typeof ratingValue === 'number') {
-                                    allRatings.push(ratingValue);
-                                    foundRating = true;
-                                    break; // Only take one rating per annotation (first question found)
-                                  }
+                              // First, try to get rating for the selected question from ratings field
+                              if (ann.ratings && typeof ann.ratings === 'object') {
+                                // Try exact question ID match (e.g., "q_1", "q_2")
+                                const ratingValue = ann.ratings[selectedQuestionId];
+                                if (ratingValue !== undefined && ratingValue !== null && typeof ratingValue === 'number') {
+                                  allRatings.push(ratingValue);
+                                  foundRating = true;
                                 }
                                 
-                                // If no question ID matched, try to get any rating from the ratings object
-                                if (!foundRating && Object.keys(ann.ratings).length > 0) {
-                                  const firstRatingValue = Object.values(ann.ratings).find(v => v !== undefined && v !== null && typeof v === 'number');
-                                  if (firstRatingValue !== undefined) {
-                                    allRatings.push(firstRatingValue as number);
-                                    foundRating = true;
+                                // Also try index-based key format (e.g., "rubricId_0", "rubricId_1")
+                                if (!foundRating) {
+                                  const indexBasedKey = Object.keys(ann.ratings).find(k => 
+                                    k.endsWith(`_${selectedQuestionIndex}`)
+                                  );
+                                  if (indexBasedKey) {
+                                    const indexRatingValue = ann.ratings[indexBasedKey];
+                                    if (indexRatingValue !== undefined && indexRatingValue !== null && typeof indexRatingValue === 'number') {
+                                      allRatings.push(indexRatingValue);
+                                      foundRating = true;
+                                    }
                                   }
                                 }
                               }
                               
-                              // Fallback to legacy rating field if no per-question rating found
-                              if (!foundRating && ann.rating !== undefined && ann.rating !== null && typeof ann.rating === 'number') {
+                              // Fallback to legacy rating field ONLY if this is the first question (index 0)
+                              // Legacy ratings are assumed to be for the first question
+                              if (!foundRating && selectedQuestionIndex === 0 && 
+                                  ann.rating !== undefined && ann.rating !== null && typeof ann.rating === 'number') {
                                 allRatings.push(ann.rating);
                               }
                             }
                             
-                            // Debug logging (remove in production)
-                            if (traceAnnotations.length > 0 && allRatings.length === 0) {
-                              console.log('No ratings found for trace:', trace.id, {
-                                annotations: traceAnnotations.map(a => ({
-                                  id: a.id,
-                                  rating: a.rating,
-                                  ratings: a.ratings,
-                                  questionIds
-                                }))
-                              });
-                            }
-                            
-                            // Calculate aggregated rating
+                            // Calculate aggregated rating for the selected question
                             if (allRatings.length > 0) {
                               if (judgeType === 'binary') {
                                 // For binary: majority vote (0 or 1)
@@ -1533,9 +1611,20 @@ The response partially meets the criteria because...`;
                           }
                           
                           // Find evaluation for this trace
+                          // The evaluation can match by: workshop_uuid (workshop trace ID), 
+                          // trace_id (MLflow trace ID), or the trace's mlflow_trace_id
                           const evaluation = evaluations.find(
-                            (e: any) => e.workshop_uuid === trace.id || e.trace_id === trace.id
+                            (e: any) => {
+                              // Match by workshop UUID (internal trace ID)
+                              if (e.workshop_uuid && e.workshop_uuid === trace.id) return true;
+                              // Match by trace_id against workshop trace ID
+                              if (e.trace_id && e.trace_id === trace.id) return true;
+                              // Match by trace_id against MLflow trace ID
+                              if (e.trace_id && trace.mlflow_trace_id && e.trace_id === trace.mlflow_trace_id) return true;
+                              return false;
+                            }
                           );
+                          
                           const judgeRating = evaluation?.predicted_rating;
                           
                           // Calculate diff and match if both ratings exist
