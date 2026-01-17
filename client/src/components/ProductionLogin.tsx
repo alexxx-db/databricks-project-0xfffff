@@ -25,9 +25,15 @@ export const ProductionLogin: React.FC = () => {
   useEffect(() => {
     const fetchWorkshops = async () => {
       try {
-        const response = await fetch('/workshops/');
+        // Add cache-busting to ensure fresh data
+        const response = await fetch(`/workshops/?_t=${Date.now()}`, {
+          headers: {
+            'Cache-Control': 'no-cache',
+          }
+        });
         if (response.ok) {
           const data = await response.json();
+          console.log('[ProductionLogin] Fetched workshops:', data.length, data);
           setWorkshops(data);
           // If there's only one workshop, auto-select it
           if (data.length === 1 && !workshopId) {
@@ -37,9 +43,11 @@ export const ProductionLogin: React.FC = () => {
           if (data.length === 0) {
             setCreateNewWorkshop(true);
           }
+        } else {
+          console.error('[ProductionLogin] Failed to fetch workshops:', response.status, response.statusText);
         }
       } catch (err) {
-        console.error('Failed to fetch workshops:', err);
+        console.error('[ProductionLogin] Error fetching workshops:', err);
       } finally {
         setIsLoadingWorkshops(false);
       }
@@ -151,21 +159,26 @@ export const ProductionLogin: React.FC = () => {
                     No workshops available. Please wait for a facilitator to create one.
                   </div>
                 ) : (
-                  <Select 
-                    value={selectedWorkshopId} 
-                    onValueChange={setSelectedWorkshopId}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select a workshop to join" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {workshops.map((workshop) => (
-                        <SelectItem key={workshop.id} value={workshop.id}>
-                          {workshop.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <>
+                    <Select 
+                      value={selectedWorkshopId} 
+                      onValueChange={setSelectedWorkshopId}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select a workshop to join" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {workshops.map((workshop) => (
+                          <SelectItem key={workshop.id} value={workshop.id}>
+                            {workshop.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <div className="text-xs text-gray-500">
+                      {workshops.length} workshop{workshops.length !== 1 ? 's' : ''} available
+                    </div>
+                  </>
                 )}
               </div>
             )}
