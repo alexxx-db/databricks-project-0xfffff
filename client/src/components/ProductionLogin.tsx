@@ -177,15 +177,18 @@ export const ProductionLogin: React.FC = () => {
                   <>
                     <Select 
                       value={selectedWorkshopId} 
-                      onValueChange={setSelectedWorkshopId}
+                      onValueChange={(value) => {
+                        console.log('[ProductionLogin] Workshop selected:', value);
+                        setSelectedWorkshopId(value);
+                      }}
                     >
                       <SelectTrigger>
                         <SelectValue placeholder="Select a workshop to join" />
                       </SelectTrigger>
                       <SelectContent>
-                        {workshops.map((workshop) => (
+                        {workshops.map((workshop, index) => (
                           <SelectItem key={workshop.id} value={workshop.id}>
-                            {workshop.name}
+                            {workshop.name} {workshops.length > 1 && `(#${index + 1})`}
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -237,15 +240,18 @@ export const ProductionLogin: React.FC = () => {
                   ) : (
                     <Select 
                       value={selectedWorkshopId} 
-                      onValueChange={setSelectedWorkshopId}
+                      onValueChange={(value) => {
+                        console.log('[ProductionLogin] Facilitator workshop selected:', value);
+                        setSelectedWorkshopId(value);
+                      }}
                     >
                       <SelectTrigger>
                         <SelectValue placeholder="Select a workshop" />
                       </SelectTrigger>
                       <SelectContent>
-                        {workshops.map((workshop) => (
+                        {workshops.map((workshop, index) => (
                           <SelectItem key={workshop.id} value={workshop.id}>
-                            {workshop.name}
+                            {workshop.name} {workshops.length > 1 && `(#${index + 1})`}
                           </SelectItem>
                         ))}
                       </SelectContent>
