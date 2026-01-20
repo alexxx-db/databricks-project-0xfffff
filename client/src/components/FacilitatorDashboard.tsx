@@ -285,6 +285,7 @@ export const FacilitatorDashboard: React.FC<FacilitatorDashboardProps> = ({ onNa
   const [isAddingTraces, setIsAddingTraces] = React.useState(false);
   const [isReorderingTraces, setIsReorderingTraces] = React.useState(false);
   const [isResettingDiscovery, setIsResettingDiscovery] = React.useState(false);
+  const [isResettingAnnotation, setIsResettingAnnotation] = React.useState(false);
   
   // Judge name state - used for MLflow feedback entries
   const [judgeName, setJudgeName] = React.useState<string>(workshop?.judge_name || 'workshop_judge');
@@ -438,11 +439,24 @@ export const FacilitatorDashboard: React.FC<FacilitatorDashboardProps> = ({ onNa
         throw new Error(error.detail || 'Failed to reset discovery');
       }
 
-      // Invalidate caches
+      // Invalidate ALL discovery-related caches comprehensively
+      // This ensures participants see a fresh start
       queryClient.invalidateQueries({ queryKey: ['workshop', workshopId] });
-      queryClient.invalidateQueries({ queryKey: ['traces', workshopId] });
+      queryClient.invalidateQueries({ queryKey: ['all-traces', workshopId] });
+      queryClient.invalidateQueries({ queryKey: ['findings', workshopId] });
+      queryClient.invalidateQueries({ queryKey: ['user-findings', workshopId] });
+      queryClient.invalidateQueries({ queryKey: ['facilitator-findings-with-users', workshopId] });
       
-      toast.success('Discovery reset! Select your trace configuration.');
+      // Invalidate ALL trace queries for this workshop (including user-specific ones)
+      // The participant trace query key is ['traces', workshopId, userId]
+      queryClient.invalidateQueries({ 
+        predicate: (query) => {
+          const key = query.queryKey;
+          return Array.isArray(key) && key[0] === 'traces' && key[1] === workshopId;
+        }
+      });
+      
+      toast.success('Discovery reset! All participant progress cleared. Select your trace configuration.');
       
       // Force page reload to reflect phase change
       window.location.reload();
@@ -450,6 +464,39 @@ export const FacilitatorDashboard: React.FC<FacilitatorDashboardProps> = ({ onNa
       toast.error(`Failed to reset discovery: ${error.message}`);
     } finally {
       setIsResettingDiscovery(false);
+    }
+  };
+
+  const handleResetAnnotation = async () => {
+    if (!workshopId) return;
+    
+    setIsResettingAnnotation(true);
+    try {
+      const response = await fetch(`/workshops/${workshopId}/reset-annotation`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || 'Failed to reset annotation');
+      }
+
+      // Invalidate annotation-related caches
+      queryClient.invalidateQueries({ queryKey: ['workshop', workshopId] });
+      queryClient.invalidateQueries({ queryKey: ['annotations', workshopId] });
+      queryClient.invalidateQueries({ queryKey: ['all-traces', workshopId] });
+      
+      toast.success('Annotation reset! All SME progress cleared. Select your trace configuration.');
+      
+      // Force page reload to reflect phase change
+      window.location.reload();
+    } catch (error: any) {
+      toast.error(`Failed to reset annotation: ${error.message}`);
+    } finally {
+      setIsResettingAnnotation(false);
     }
   };
 
@@ -1056,6 +1103,58 @@ export const FacilitatorDashboard: React.FC<FacilitatorDashboardProps> = ({ onNa
                     <div className="flex justify-center">
                       <PhaseControlButton phase="annotation" />
                     </div>
+                  </div>
+
+                  {/* Reset Annotation */}
+                  <div className="border border-purple-200 rounded-lg p-4 bg-purple-50">
+                    <div className="flex items-center gap-2 mb-3">
+                      <RotateCcw className="w-5 h-5 text-purple-600" />
+                      <div className="text-left">
+                        <div className="font-medium text-purple-800">Reset Annotation</div>
+                        <div className="text-xs text-purple-600">Go back to reconfigure trace selection</div>
+                      </div>
+                    </div>
+                    <AlertDialog>
+                      <AlertDialogTrigger asChild>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={isResettingAnnotation}
+                          className="w-full border-purple-300 text-purple-700 hover:bg-purple-100"
+                        >
+                          {isResettingAnnotation ? (
+                            <>
+                              <div className="w-3 h-3 border border-purple-300 border-t-purple-600 rounded-full animate-spin mr-2" />
+                              Resetting...
+                            </>
+                          ) : (
+                            <>
+                              <RotateCcw className="w-3 h-3 mr-2" />
+                              Reset & Reconfigure
+                            </>
+                          )}
+                        </Button>
+                      </AlertDialogTrigger>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>Reset Annotation Phase?</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            This will reset the annotation phase so you can reconfigure the trace selection and settings.
+                            <br /><br />
+                            <strong>All SME annotations will be cleared.</strong> SMEs will need to start their annotations from the beginning.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>Cancel</AlertDialogCancel>
+                          <AlertDialogAction 
+                            onClick={handleResetAnnotation}
+                            className="bg-purple-600 hover:bg-purple-700"
+                          >
+                            Reset Annotation
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
                   </div>
                 </>
               )}

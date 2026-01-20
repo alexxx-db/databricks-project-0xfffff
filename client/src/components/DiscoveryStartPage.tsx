@@ -10,7 +10,8 @@ import { useWorkshopContext } from '@/context/WorkshopContext';
 import { useWorkflowContext } from '@/context/WorkflowContext';
 import { WorkshopsService } from '@/client';
 import { useAllTraces } from '@/hooks/useWorkshopApi';
-import { Play, Users, Search, Lightbulb, ChevronRight, Database, Settings } from 'lucide-react';
+import { Play, Users, Search, Lightbulb, ChevronRight, Database, Settings, Shuffle } from 'lucide-react';
+import { Switch } from '@/components/ui/switch';
 import { toast } from 'sonner';
 
 interface DiscoveryStartPageProps {
@@ -23,6 +24,7 @@ export const DiscoveryStartPage: React.FC<DiscoveryStartPageProps> = ({ onStartD
   const [isStarting, setIsStarting] = React.useState(false);
   const [traceLimit, setTraceLimit] = React.useState<string>('10');
   const [customLimit, setCustomLimit] = React.useState<string>('10');
+  const [randomizeTraces, setRandomizeTraces] = React.useState<boolean>(false);
   
   // Get total number of traces
   const { data: traces } = useAllTraces(workshopId!);
@@ -37,10 +39,11 @@ export const DiscoveryStartPage: React.FC<DiscoveryStartPageProps> = ({ onStartD
       
 
       
-      // Make direct API call with trace_limit parameter
-      const url = limit 
-        ? `/workshops/${workshopId}/begin-discovery?trace_limit=${limit}`
-        : `/workshops/${workshopId}/begin-discovery`;
+      // Make direct API call with trace_limit and randomize parameters
+      const params = new URLSearchParams();
+      if (limit) params.append('trace_limit', limit.toString());
+      params.append('randomize', randomizeTraces.toString());
+      const url = `/workshops/${workshopId}/begin-discovery?${params.toString()}`;
       
       
       const response = await fetch(url, {
@@ -206,6 +209,19 @@ export const DiscoveryStartPage: React.FC<DiscoveryStartPageProps> = ({ onStartD
             </div>
           )}
 
+          {/* Randomization Toggle */}
+          <div className="mt-4 pt-3 border-t border-amber-200 flex items-center justify-between">
+            <Label htmlFor="randomize-toggle" className="text-sm text-slate-600 cursor-pointer flex items-center gap-2">
+              <Shuffle className="w-4 h-4 text-amber-600" />
+              Randomize trace order
+            </Label>
+            <Switch
+              id="randomize-toggle"
+              checked={randomizeTraces}
+              onCheckedChange={setRandomizeTraces}
+            />
+          </div>
+
           {/* Show current selection info */}
           <div className="mt-4 p-3 bg-blue-50 rounded-lg">
             <div className="text-sm">
@@ -214,6 +230,7 @@ export const DiscoveryStartPage: React.FC<DiscoveryStartPageProps> = ({ onStartD
                   ? `${customLimit} traces` 
                   : `${traceLimit} traces (Standard)`
               }
+              {randomizeTraces && ' (randomized per user)'}
             </div>
             {parseInt(traceLimit === 'custom' ? customLimit : traceLimit) < totalTraces && (
               <div className="text-xs text-slate-600 mt-1">

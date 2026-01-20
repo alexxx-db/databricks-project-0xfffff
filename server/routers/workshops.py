@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -170,6 +170,7 @@ class AlignmentRequest(BaseModel):
     evaluation_model_name: str  # Model for evaluate() job
     alignment_model_name: Optional[str] = None  # Model for SIMBA optimizer (judge_model_uri), required for alignment
     prompt_id: Optional[str] = None  # Existing prompt ID to update (instead of creating a new one)
+    judge_type: Optional[str] = None  # Explicit judge type: 'likert', 'binary', 'freeform'
 
 
 
@@ -178,9 +179,36 @@ class SimpleEvaluationRequest(BaseModel):
   judge_prompt: str
   endpoint_name: str  # Databricks model serving endpoint name
   prompt_id: Optional[str] = None  # Existing prompt ID to update
+  judge_type: Optional[str] = None  # Explicit judge type: 'likert', 'binary', 'freeform'
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+@router.get("/")
+async def list_workshops(
+    facilitator_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    db: Session = Depends(get_db)
+) -> List[Workshop]:
+    """List all workshops, optionally filtered by facilitator or user.
+    
+    Args:
+        facilitator_id: If provided, only return workshops created by this facilitator
+        user_id: If provided, return all workshops the user has access to (as facilitator or participant)
+        db: Database session
+        
+    Returns:
+        List of workshops sorted by creation date (newest first)
+    """
+    db_service = DatabaseService(db)
+    
+    if user_id:
+        # Return all workshops the user has access to
+        return db_service.get_workshops_for_user(user_id)
+    else:
+        # Return all workshops (optionally filtered by facilitator)
+        return db_service.list_workshops(facilitator_id)
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
@@ -519,14 +547,18 @@ async def clear_rubric(workshop_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{workshop_id}/begin-discovery")
-async def begin_discovery_phase(workshop_id: str, trace_limit: Optional[int] = None, db: Session = Depends(get_db)):
+async def begin_discovery_phase(
+    workshop_id: str, 
+    trace_limit: Optional[int] = None, 
+    randomize: bool = False,
+    db: Session = Depends(get_db)
+):
     """Begin the discovery phase and distribute traces to participants.
-
-    Each user will see the same set of traces, but in a randomized order unique to them.
 
     Args:
         workshop_id: The workshop ID
         trace_limit: Optional limit on number of traces to use (default: all)
+        randomize: Whether to randomize trace order per user (default: False - same order for all)
         db: Database session
     """
 
@@ -538,6 +570,9 @@ async def begin_discovery_phase(workshop_id: str, trace_limit: Optional[int] = N
     # Update workshop phase to discovery and mark discovery as started
     db_service.update_workshop_phase(workshop_id, WorkshopPhase.DISCOVERY)
     db_service.update_phase_started(workshop_id, discovery_started=True)
+    
+    # Store the randomization setting
+    db_service.update_discovery_randomize_setting(workshop_id, randomize)
 
     # Get all traces
     traces = db_service.get_traces(workshop_id)
@@ -551,14 +586,13 @@ async def begin_discovery_phase(workshop_id: str, trace_limit: Optional[int] = N
         )
 
     print(
-        f"🔍 DEBUG begin_discovery: workshop_id={workshop_id}, trace_limit={trace_limit}, total_traces={total_traces}"
+        f"🔍 DEBUG begin_discovery: workshop_id={workshop_id}, trace_limit={trace_limit}, randomize={randomize}, total_traces={total_traces}"
     )
     print(f"🔍 DEBUG trace_ids: {[t.id for t in traces]}")
 
     # Apply trace limit - take first N traces in chronological order
-    # Note: Each user will see these traces in their own randomized order
     if trace_limit and trace_limit > 0 and trace_limit < total_traces:
-        print(f"🎯 DEBUG: Taking first {trace_limit} traces from {total_traces} (will be randomized per user)")
+        print(f"🎯 DEBUG: Taking first {trace_limit} traces from {total_traces}")
         # Take the first N traces in chronological order
         selected_traces = traces[: min(trace_limit, total_traces)]
         trace_ids_to_use = [trace.id for trace in selected_traces]
@@ -573,12 +607,14 @@ async def begin_discovery_phase(workshop_id: str, trace_limit: Optional[int] = N
     # Store the active discovery trace IDs in the workshop
     db_service.update_active_discovery_traces(workshop_id, trace_ids_to_use)
 
+    randomize_msg = "randomized per user" if randomize else "in chronological order"
     return {
-        "message": f"Discovery phase started with {traces_used} traces from {total_traces} total (each user will see traces in randomized order)",
+        "message": f"Discovery phase started with {traces_used} traces from {total_traces} total ({randomize_msg})",
         "phase": "discovery",
         "total_traces": total_traces,
         "traces_used": traces_used,
         "trace_limit": trace_limit,
+        "randomize": randomize,
     }
 
 
@@ -726,12 +762,21 @@ async def reorder_annotation_traces(workshop_id: str, db: Session = Depends(get_
 async def begin_annotation_phase(workshop_id: str, request: dict = {}, db: Session = Depends(get_db)):
     """Begin the annotation phase with a subset of traces.
 
-    Each user will see the same set of traces, but in a randomized order unique to them.
+    Args:
+        workshop_id: The workshop ID
+        request: JSON body with optional fields:
+            - trace_limit: Number of traces to use (default: 10, -1 for all)
+            - randomize: Whether to randomize trace order per user (default: False)
+    
+    When randomize=False (default): All SMEs see traces in the same chronological order.
+    When randomize=True: All SMEs see the same set of traces but in different random orders.
     """
     import random
 
     # Get the optional trace limit from request (default to 10)
     trace_limit = request.get("trace_limit", 10)
+    # Get the optional randomize flag (default to False - same order for all users)
+    randomize = request.get("randomize", False)
 
     db_service = DatabaseService(db)
     workshop = db_service.get_workshop(workshop_id)
@@ -755,28 +800,32 @@ async def begin_annotation_phase(workshop_id: str, request: dict = {}, db: Sessi
 
     # Determine how many traces to use
     if trace_limit == -1 or trace_limit >= total_traces:
-        # Use all traces
+        # Use all traces in chronological order
         trace_ids_to_use = [trace.id for trace in traces]
         traces_used = total_traces
     else:
-        # Sample a subset of traces
+        # Take first N traces (chronological order, not random sampling)
         traces_used = min(trace_limit, total_traces)
-        sampled_traces = random.sample(traces, traces_used)
-        trace_ids_to_use = [trace.id for trace in sampled_traces]
+        trace_ids_to_use = [trace.id for trace in traces[:traces_used]]
 
     # Store the active annotation trace IDs in the workshop
     db_service.update_active_annotation_traces(workshop_id, trace_ids_to_use)
+    
+    # Store the randomization setting
+    db_service.update_annotation_randomize_setting(workshop_id, randomize)
 
     # Update workshop phase to annotation and mark annotation as started
     db_service.update_workshop_phase(workshop_id, WorkshopPhase.ANNOTATION)
     db_service.update_phase_started(workshop_id, annotation_started=True)
 
+    randomize_msg = "randomized per SME" if randomize else "in chronological order"
     return {
-        "message": f"Annotation phase started with {traces_used} traces from {total_traces} total (each user will see traces in randomized order)",
+        "message": f"Annotation phase started with {traces_used} traces from {total_traces} total ({randomize_msg})",
         "phase": "annotation",
         "total_traces": total_traces,
         "traces_used": traces_used,
         "trace_limit": trace_limit,
+        "randomize": randomize,
     }
 
 
@@ -807,14 +856,20 @@ async def reset_discovery(workshop_id: str, db: Session = Depends(get_db)):
     """Reset a workshop back to before discovery phase started (facilitator only).
 
     This allows changing the discovery configuration (e.g., number of traces).
-    Traces are kept, but the phase is reset so discovery can be reconfigured.
+    
+    IMPORTANT: This clears ALL participant discovery progress:
+    - All discovery findings/responses submitted by participants
+    - All user trace orders (personalized trace lists)
+    - All user discovery completions
+    
+    Traces are kept, but participants will start fresh from the beginning.
     """
     db_service = DatabaseService(db)
     workshop = db_service.get_workshop(workshop_id)
     if not workshop:
         raise HTTPException(status_code=404, detail="Workshop not found")
 
-    # Reset workshop to pre-discovery state
+    # Reset workshop to pre-discovery state (clears all participant progress)
     updated_workshop = db_service.reset_workshop_to_discovery(workshop_id)
 
     if not updated_workshop:
@@ -823,10 +878,43 @@ async def reset_discovery(workshop_id: str, db: Session = Depends(get_db)):
     traces = db_service.get_traces(workshop_id)
 
     return {
-        "message": "Discovery reset. You can now select a different trace configuration.",
+        "message": "Discovery reset. All participant progress cleared. You can now select a different trace configuration.",
         "workshop_id": workshop_id,
         "current_phase": updated_workshop.current_phase,
         "discovery_started": updated_workshop.discovery_started,
+        "traces_available": len(traces),
+    }
+
+
+@router.post("/{workshop_id}/reset-annotation")
+async def reset_annotation(workshop_id: str, db: Session = Depends(get_db)):
+    """Reset a workshop back to before annotation phase started (facilitator only).
+
+    This allows changing the annotation configuration (e.g., trace selection, randomization).
+    
+    IMPORTANT: This clears ALL SME annotation progress:
+    - All annotations submitted by SMEs
+    
+    Traces are kept, but SMEs will start fresh from the beginning.
+    """
+    db_service = DatabaseService(db)
+    workshop = db_service.get_workshop(workshop_id)
+    if not workshop:
+        raise HTTPException(status_code=404, detail="Workshop not found")
+
+    # Reset workshop to pre-annotation state (clears all SME progress)
+    updated_workshop = db_service.reset_workshop_to_annotation(workshop_id)
+
+    if not updated_workshop:
+        raise HTTPException(status_code=500, detail="Failed to reset workshop")
+
+    traces = db_service.get_traces(workshop_id)
+
+    return {
+        "message": "Annotation reset. All SME progress cleared. You can now select a different trace configuration.",
+        "workshop_id": workshop_id,
+        "current_phase": updated_workshop.current_phase,
+        "annotation_started": updated_workshop.annotation_started,
         "traces_available": len(traces),
     }
 
@@ -1872,6 +1960,23 @@ async def upload_csv_traces(
             if not row.get("request_preview") or not row.get("response_preview"):
                 continue
 
+            # Get and clean request/response text
+            def clean_csv_text(text):
+                if not text:
+                    return ""
+                text = text.strip()
+                # Remove surrounding quotes
+                while text.startswith('"') and text.endswith('"') and len(text) > 1:
+                    text = text[1:-1].strip()
+                text = text.strip('"').strip("'")
+                text = text.replace('""', '"')
+                if '\\n' in text:
+                    text = text.replace('\\n', '\n')
+                return text
+            
+            request_text = clean_csv_text(row["request_preview"])
+            response_text = clean_csv_text(row["response_preview"])
+
             # Build rich context from MLflow metadata
             context = {"source": "mlflow_csv_upload", "filename": file.filename, "csv_row_number": row_number}
 
@@ -1941,6 +2046,164 @@ async def upload_csv_traces(
         raise
     except Exception as e:
         logger.error(f"Failed to process CSV file: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to process CSV file: {str(e)}")
+
+
+@router.post("/{workshop_id}/csv-upload-to-mlflow")
+async def upload_csv_and_log_to_mlflow(
+    workshop_id: str,
+    file: UploadFile = File(...),
+    databricks_host: str = Form(None),
+    databricks_token: str = Form(None),
+    experiment_id: str = Form(None),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Upload CSV with request/response data and log each row as an MLflow trace.
+    
+    This enables customers who don't have existing MLflow traces to participate
+    in the Judge Builder workshop by uploading conversational data as CSV.
+    
+    Expected CSV format:
+    - Required columns: request_preview, response_preview
+    - Optional columns: any additional metadata
+    
+    The endpoint will:
+    1. Parse the CSV file
+    2. For each row, create an MLflow trace with the request/response
+    3. Store the traces locally with their MLflow trace IDs
+    
+    Environment variables used if parameters not provided:
+    - DATABRICKS_HOST
+    - DATABRICKS_TOKEN  
+    - MLFLOW_EXPERIMENT_ID
+    """
+    import csv
+    import io
+    import os
+    
+    db_service = DatabaseService(db)
+    workshop = db_service.get_workshop(workshop_id)
+    if not workshop:
+        raise HTTPException(status_code=404, detail="Workshop not found")
+
+    # Validate file type
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="File must be a CSV file")
+
+    # Get MLflow configuration from parameters or environment variables
+    host = databricks_host or os.environ.get("DATABRICKS_HOST")
+    token = databricks_token or os.environ.get("DATABRICKS_TOKEN")
+    exp_id = experiment_id or os.environ.get("MLFLOW_EXPERIMENT_ID")
+    
+    if not host or not token or not exp_id:
+        raise HTTPException(
+            status_code=400, 
+            detail="MLflow configuration required. Provide databricks_host, databricks_token, and experiment_id as parameters or set DATABRICKS_HOST, DATABRICKS_TOKEN, and MLFLOW_EXPERIMENT_ID environment variables."
+        )
+    
+    # Ensure host has proper format
+    if not host.startswith("https://"):
+        host = f"https://{host}"
+    host = host.rstrip("/")
+
+    try:
+        import mlflow
+        
+        # Configure MLflow
+        os.environ["DATABRICKS_HOST"] = host
+        os.environ["DATABRICKS_TOKEN"] = token
+        mlflow.set_tracking_uri("databricks")
+        mlflow.set_experiment(experiment_id=exp_id)
+        
+        # Read file content
+        content = await file.read()
+        decoded_content = content.decode("utf-8")
+
+        # Parse CSV
+        csv_reader = csv.DictReader(io.StringIO(decoded_content))
+
+        # Validate required columns
+        if (
+            not csv_reader.fieldnames
+            or "request_preview" not in csv_reader.fieldnames
+            or "response_preview" not in csv_reader.fieldnames
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail='CSV must contain "request_preview" and "response_preview" columns. Found columns: '
+                + ", ".join(csv_reader.fieldnames or []),
+            )
+
+        # Process each row and create MLflow traces
+        row_number = 0
+        created_traces = 0
+        errors = []
+        
+        # Helper to clean CSV text
+        def clean_text(text):
+            if not text:
+                return ""
+            text = text.strip()
+            while text.startswith('"') and text.endswith('"') and len(text) > 1:
+                text = text[1:-1].strip()
+            text = text.strip('"').strip("'")
+            text = text.replace('""', '"')
+            if '\\n' in text:
+                text = text.replace('\\n', '\n')
+            return text
+        
+        for row in csv_reader:
+            row_number += 1
+
+            # Skip empty rows
+            request_text = clean_text(row.get("request_preview", ""))
+            response_text = clean_text(row.get("response_preview", ""))
+            
+            if not request_text or not response_text:
+                continue
+
+            try:
+                # Create MLflow trace using start_span context manager
+                with mlflow.start_span(name=f"csv_import_row_{row_number}") as span:
+                    span.set_inputs(request_text)
+                    span.set_outputs(response_text)
+                
+                created_traces += 1
+                logger.info(f"Created MLflow trace for row {row_number}")
+                
+            except Exception as trace_error:
+                errors.append(f"Row {row_number}: {str(trace_error)}")
+                logger.warning(f"Failed to create MLflow trace for row {row_number}: {str(trace_error)}")
+                continue
+
+        if created_traces == 0:
+            error_msg = "No valid MLflow traces could be created from CSV file"
+            if errors:
+                error_msg += f". Errors: {'; '.join(errors[:5])}"
+            raise HTTPException(status_code=400, detail=error_msg)
+
+        # NOTE: This endpoint ONLY creates MLflow traces - it does NOT import into Discovery.
+        # To import the MLflow traces into Discovery, use the "Import from MLflow" feature
+        # or choose "Import directly into Discovery" when uploading CSV.
+
+        result = {
+            "message": f"Successfully created {created_traces} MLflow traces",
+            "mlflow_traces_created": created_traces,
+            "workshop_id": workshop_id,
+            "filename": file.filename,
+            "experiment_id": exp_id,
+            "mlflow_host": host,
+        }
+        
+        if errors:
+            result["warnings"] = errors[:10]  # Include first 10 errors as warnings
+            
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to process CSV and create MLflow traces: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to process CSV file: {str(e)}")
 
 
@@ -2408,6 +2671,7 @@ async def start_evaluation_job(
                     judge_prompt=request.judge_prompt,
                     evaluation_model_name=request.evaluation_model_name,
                     mlflow_config=mlflow_config,
+                    judge_type=request.judge_type,  # Pass explicit judge type from selected rubric question
                 ):
                     if isinstance(message, dict):
                         # This is the final result

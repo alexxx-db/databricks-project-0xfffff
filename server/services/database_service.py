@@ -120,18 +120,9 @@ class DatabaseService:
       created_at=db_workshop.created_at,
     )
 
-  def get_workshop(self, workshop_id: str) -> Optional[Workshop]:
-    """Get a workshop by ID with caching."""
-    cache_key = self._get_cache_key('workshop', workshop_id)
-    cached_workshop = self._get_from_cache(cache_key)
-    if cached_workshop is not None:
-      return cached_workshop
-
-    db_workshop = self.db.query(WorkshopDB).filter(WorkshopDB.id == workshop_id).first()
-    if not db_workshop:
-      return None
-
-    workshop = Workshop(
+  def _workshop_from_db(self, db_workshop: WorkshopDB) -> Workshop:
+    """Convert a database workshop object to a Workshop model."""
+    return Workshop(
       id=db_workshop.id,
       name=db_workshop.name,
       description=db_workshop.description,
@@ -143,12 +134,86 @@ class DatabaseService:
       annotation_started=db_workshop.annotation_started or False,
       active_discovery_trace_ids=db_workshop.active_discovery_trace_ids or [],
       active_annotation_trace_ids=db_workshop.active_annotation_trace_ids or [],
+      discovery_randomize_traces=getattr(db_workshop, 'discovery_randomize_traces', False) or False,
+      annotation_randomize_traces=getattr(db_workshop, 'annotation_randomize_traces', False) or False,
       judge_name=db_workshop.judge_name or 'workshop_judge',
       created_at=db_workshop.created_at,
     )
 
+  def get_workshop(self, workshop_id: str) -> Optional[Workshop]:
+    """Get a workshop by ID with caching."""
+    cache_key = self._get_cache_key('workshop', workshop_id)
+    cached_workshop = self._get_from_cache(cache_key)
+    if cached_workshop is not None:
+      return cached_workshop
+
+    db_workshop = self.db.query(WorkshopDB).filter(WorkshopDB.id == workshop_id).first()
+    if not db_workshop:
+      return None
+
+    workshop = self._workshop_from_db(db_workshop)
+
     self._set_cache(cache_key, workshop)
     return workshop
+
+  def list_workshops(self, facilitator_id: Optional[str] = None) -> List[Workshop]:
+    """List all workshops, optionally filtered by facilitator.
+    
+    Args:
+        facilitator_id: If provided, only return workshops created by this facilitator
+        
+    Returns:
+        List of Workshop objects sorted by creation date (newest first)
+    """
+    query = self.db.query(WorkshopDB)
+    
+    if facilitator_id:
+      query = query.filter(WorkshopDB.facilitator_id == facilitator_id)
+    
+    # Order by creation date, newest first
+    query = query.order_by(WorkshopDB.created_at.desc())
+    
+    db_workshops = query.all()
+    return [self._workshop_from_db(w) for w in db_workshops]
+
+  def get_workshops_for_user(self, user_id: str) -> List[Workshop]:
+    """Get all workshops that a user is part of (either as facilitator or participant).
+    
+    Args:
+        user_id: The user ID to find workshops for
+        
+    Returns:
+        List of Workshop objects the user has access to
+    """
+    from server.database import UserDB, WorkshopDB
+    
+    # Get workshops where user is the facilitator
+    facilitator_workshops = self.db.query(WorkshopDB).filter(
+      WorkshopDB.facilitator_id == user_id
+    ).all()
+    
+    # Get workshops where user has been added as a participant
+    participant_workshop_ids = self.db.query(UserDB.workshop_id).filter(
+      UserDB.id == user_id,
+      UserDB.workshop_id.isnot(None)
+    ).distinct().all()
+    
+    participant_workshop_ids = [w[0] for w in participant_workshop_ids if w[0]]
+    
+    participant_workshops = self.db.query(WorkshopDB).filter(
+      WorkshopDB.id.in_(participant_workshop_ids)
+    ).all() if participant_workshop_ids else []
+    
+    # Combine and deduplicate
+    all_workshops = {w.id: w for w in facilitator_workshops}
+    for w in participant_workshops:
+      if w.id not in all_workshops:
+        all_workshops[w.id] = w
+    
+    # Sort by creation date, newest first
+    sorted_workshops = sorted(all_workshops.values(), key=lambda w: w.created_at or '', reverse=True)
+    
+    return [self._workshop_from_db(w) for w in sorted_workshops]
 
   def update_workshop_judge_name(self, workshop_id: str, judge_name: str) -> Optional[Workshop]:
     """Update the judge name for a workshop."""
@@ -236,20 +301,7 @@ class DatabaseService:
     self.db.commit()
     self.db.refresh(db_workshop)
 
-    return Workshop(
-      id=db_workshop.id,
-      name=db_workshop.name,
-      description=db_workshop.description,
-      facilitator_id=db_workshop.facilitator_id,
-      status=db_workshop.status,
-      current_phase=db_workshop.current_phase,
-      completed_phases=db_workshop.completed_phases or [],
-      discovery_started=db_workshop.discovery_started or False,
-      annotation_started=db_workshop.annotation_started or False,
-      active_discovery_trace_ids=db_workshop.active_discovery_trace_ids or [],
-      active_annotation_trace_ids=db_workshop.active_annotation_trace_ids or [],
-      created_at=db_workshop.created_at,
-    )
+    return self._workshop_from_db(db_workshop)
 
   def update_active_annotation_traces(self, workshop_id: str, trace_ids: List[str]) -> Optional[Workshop]:
     """Update the active annotation trace IDs for a workshop."""
@@ -261,20 +313,31 @@ class DatabaseService:
     self.db.commit()
     self.db.refresh(db_workshop)
 
-    return Workshop(
-      id=db_workshop.id,
-      name=db_workshop.name,
-      description=db_workshop.description,
-      facilitator_id=db_workshop.facilitator_id,
-      status=db_workshop.status,
-      current_phase=db_workshop.current_phase,
-      completed_phases=db_workshop.completed_phases or [],
-      discovery_started=db_workshop.discovery_started or False,
-      annotation_started=db_workshop.annotation_started or False,
-      active_discovery_trace_ids=db_workshop.active_discovery_trace_ids or [],
-      active_annotation_trace_ids=db_workshop.active_annotation_trace_ids or [],
-      created_at=db_workshop.created_at,
-    )
+    return self._workshop_from_db(db_workshop)
+
+  def update_discovery_randomize_setting(self, workshop_id: str, randomize: bool) -> Optional[Workshop]:
+    """Update the discovery trace randomization setting for a workshop."""
+    db_workshop = self.db.query(WorkshopDB).filter(WorkshopDB.id == workshop_id).first()
+    if not db_workshop:
+      return None
+
+    db_workshop.discovery_randomize_traces = randomize
+    self.db.commit()
+    self.db.refresh(db_workshop)
+
+    return self._workshop_from_db(db_workshop)
+
+  def update_annotation_randomize_setting(self, workshop_id: str, randomize: bool) -> Optional[Workshop]:
+    """Update the annotation trace randomization setting for a workshop."""
+    db_workshop = self.db.query(WorkshopDB).filter(WorkshopDB.id == workshop_id).first()
+    if not db_workshop:
+      return None
+
+    db_workshop.annotation_randomize_traces = randomize
+    self.db.commit()
+    self.db.refresh(db_workshop)
+
+    return self._workshop_from_db(db_workshop)
 
   # Trace operations
   def add_traces(self, workshop_id: str, traces: List[TraceUpload]) -> List[Trace]:
@@ -330,17 +393,18 @@ class DatabaseService:
     return [self._trace_from_db(db_trace) for db_trace in db_traces]
 
   def get_active_discovery_traces(self, workshop_id: str, user_id: str) -> List[Trace]:
-    """Get only the active discovery traces for a workshop in user-specific randomized order.
+    """Get only the active discovery traces for a workshop.
 
-    Each user sees the same set of traces but in a different randomized order.
-    The order is deterministic per user (based on user_id seed).
+    If randomization is enabled for the workshop, each user sees traces in a different 
+    randomized order (deterministic per user based on user_id seed).
+    If randomization is disabled (default), all users see traces in the same chronological order.
 
     Args:
         workshop_id: The workshop ID
-        user_id: The user ID (required for personalized trace ordering)
+        user_id: The user ID (required for personalized trace ordering when randomization is enabled)
 
     Returns:
-        List of traces in user-specific randomized order
+        List of traces in appropriate order
 
     Raises:
         ValueError: If user_id is not provided
@@ -358,8 +422,30 @@ class DatabaseService:
       return []
 
     active_trace_ids = workshop.active_discovery_trace_ids
+    
+    # Check if randomization is enabled for this workshop
+    randomize_enabled = getattr(workshop, 'discovery_randomize_traces', False) or False
 
-    # Get or create user-specific trace order
+    if not randomize_enabled:
+      # Randomization OFF: Return traces in chronological order (same for all users)
+      # Fetch traces in the order they appear in active_discovery_trace_ids
+      db_traces = self.db.query(TraceDB).filter(TraceDB.id.in_(active_trace_ids)).all()
+      
+      # Create ordered result - preserve the chronological order from active_discovery_trace_ids
+      trace_map = {t.id: t for t in db_traces}
+      result = []
+      for tid in active_trace_ids:
+        if tid in trace_map:
+          result.append(self._trace_from_db(trace_map[tid]))
+
+      # Log performance metrics
+      load_time = time.time() - start_time
+      if load_time > 0.1:
+        print(f'⚠️ Slow trace load: {load_time:.3f}s for {len(result)} traces (user: {user_id[:8]}..., no randomization)')
+
+      return result
+
+    # Randomization ON: Get or create user-specific trace order
     user_order = self.get_user_trace_order(workshop_id, user_id)
     
     if not user_order:
@@ -400,7 +486,7 @@ class DatabaseService:
     # Log performance metrics
     load_time = time.time() - start_time
     if load_time > 0.1:  # Log slow requests
-      print(f'⚠️ Slow trace load: {load_time:.3f}s for {len(result)} traces (user: {user_id[:8]}...)')
+      print(f'⚠️ Slow trace load: {load_time:.3f}s for {len(result)} traces (user: {user_id[:8]}..., randomized)')
 
     return result
 
@@ -441,17 +527,18 @@ class DatabaseService:
     return randomized_ids
 
   def get_active_annotation_traces(self, workshop_id: str, user_id: str) -> List[Trace]:
-    """Get only the active annotation traces for a workshop in user-specific randomized order.
+    """Get only the active annotation traces for a workshop.
 
-    Each user sees the same set of traces but in a different randomized order.
-    The order is deterministic per user (based on user_id seed).
+    If randomization is enabled for the workshop, each user sees traces in a different 
+    randomized order (deterministic per user based on user_id seed).
+    If randomization is disabled (default), all users see traces in the same chronological order.
 
     Args:
         workshop_id: The workshop ID
-        user_id: The user ID (required for personalized trace ordering)
+        user_id: The user ID (required for personalized trace ordering when randomization is enabled)
 
     Returns:
-        List of traces in user-specific randomized order
+        List of traces in appropriate order
 
     Raises:
         ValueError: If user_id is not provided
@@ -468,8 +555,30 @@ class DatabaseService:
       return []
 
     active_trace_ids = workshop.active_annotation_trace_ids
+    
+    # Check if randomization is enabled for this workshop
+    randomize_enabled = getattr(workshop, 'annotation_randomize_traces', False) or False
 
-    # Get or create user-specific trace order
+    if not randomize_enabled:
+      # Randomization OFF: Return traces in chronological order (same for all users)
+      # Fetch traces in the order they appear in active_annotation_trace_ids
+      db_traces = self.db.query(TraceDB).filter(TraceDB.id.in_(active_trace_ids)).all()
+      
+      # Create ordered result - preserve the chronological order from active_annotation_trace_ids
+      trace_map = {t.id: t for t in db_traces}
+      result = []
+      for tid in active_trace_ids:
+        if tid in trace_map:
+          result.append(self._trace_from_db(trace_map[tid]))
+
+      # Log performance metrics
+      load_time = time.time() - start_time
+      if load_time > 0.1:
+        print(f'⚠️ Slow annotation trace load: {load_time:.3f}s for {len(result)} traces (user: {user_id[:8]}..., no randomization)')
+
+      return result
+
+    # Randomization ON: Get or create user-specific trace order
     user_order = self.get_user_trace_order(workshop_id, user_id)
     
     if not user_order:
@@ -510,21 +619,32 @@ class DatabaseService:
     # Log performance metrics
     load_time = time.time() - start_time
     if load_time > 0.1:  # Log slow requests
-      print(f'⚠️ Slow annotation trace load: {load_time:.3f}s for {len(result)} traces (user: {user_id[:8]}...)')
+      print(f'⚠️ Slow annotation trace load: {load_time:.3f}s for {len(result)} traces (user: {user_id[:8]}..., randomized)')
 
     return result
 
   # Discovery finding operations
   def add_finding(self, workshop_id: str, finding_data: DiscoveryFindingCreate) -> DiscoveryFinding:
-    """Add or update a discovery finding (upsert) with proper concurrency handling."""
-    from sqlalchemy.exc import IntegrityError
+    """Add or update a discovery finding (upsert) with automatic retry on failure.
+    
+    Retries are handled transparently in the backend - the frontend only sees
+    success or failure after all retries are exhausted.
+    
+    Handles:
+    - IntegrityError: Race conditions when multiple users save simultaneously
+    - OperationalError: Database locked/busy (SQLite concurrent access)
+    - General exceptions: Network issues, timeouts, etc.
+    """
+    from sqlalchemy.exc import IntegrityError, OperationalError
     import time
     
     finding_id = str(uuid.uuid4())
     max_retries = 3
+    base_delay = 0.2  # Base delay in seconds
     
     logger.info(f"📝 add_finding called: workshop_id={workshop_id}, trace_id={finding_data.trace_id}, user_id={finding_data.user_id}")
     
+    last_error = None
     for attempt in range(max_retries):
       try:
         # First, try to find existing record to preserve its ID
@@ -545,7 +665,7 @@ class DatabaseService:
           logger.info(f"✅ Finding updated successfully: id={db_finding.id}")
         else:
           # Create new finding
-          logger.info(f"🆕 Creating new finding (attempt {attempt + 1})")
+          logger.info(f"🆕 Creating new finding (attempt {attempt + 1}/{max_retries})")
           db_finding = DiscoveryFindingDB(
             id=finding_id,
             workshop_id=workshop_id,
@@ -569,45 +689,71 @@ class DatabaseService:
         
       except IntegrityError as e:
         # Handle race condition - another request inserted the same record
-        logger.warning(f"⚠️ IntegrityError on finding save (attempt {attempt + 1}): {e}")
+        last_error = e
+        logger.warning(f"⚠️ IntegrityError on finding save (attempt {attempt + 1}/{max_retries}): {e}")
         self.db.rollback()
         if attempt < max_retries - 1:
-          time.sleep(0.1 * (attempt + 1))  # Exponential backoff
+          delay = base_delay * (2 ** attempt)  # Exponential backoff: 0.2, 0.4, 0.8s
+          logger.info(f"🔄 Retrying in {delay:.1f}s...")
+          time.sleep(delay)
           continue
         else:
           # On final attempt, try to fetch and update the existing record
           logger.info("🔄 Final attempt: fetching existing finding to update")
-          existing = self.db.query(DiscoveryFindingDB).filter(
-            DiscoveryFindingDB.workshop_id == workshop_id,
-            DiscoveryFindingDB.trace_id == finding_data.trace_id,
-            DiscoveryFindingDB.user_id == finding_data.user_id
-          ).first()
-          if existing:
-            existing.insight = finding_data.insight
-            self.db.commit()
-            self.db.refresh(existing)
-            logger.info(f"✅ Finding updated after conflict: id={existing.id}")
-            return DiscoveryFinding(
-              id=existing.id,
-              workshop_id=existing.workshop_id,
-              trace_id=existing.trace_id,
-              user_id=existing.user_id,
-              insight=existing.insight,
-              created_at=existing.created_at,
-            )
+          try:
+            existing = self.db.query(DiscoveryFindingDB).filter(
+              DiscoveryFindingDB.workshop_id == workshop_id,
+              DiscoveryFindingDB.trace_id == finding_data.trace_id,
+              DiscoveryFindingDB.user_id == finding_data.user_id
+            ).first()
+            if existing:
+              existing.insight = finding_data.insight
+              self.db.commit()
+              self.db.refresh(existing)
+              logger.info(f"✅ Finding updated after conflict: id={existing.id}")
+              return DiscoveryFinding(
+                id=existing.id,
+                workshop_id=existing.workshop_id,
+                trace_id=existing.trace_id,
+                user_id=existing.user_id,
+                insight=existing.insight,
+                created_at=existing.created_at,
+              )
+          except Exception as final_error:
+            logger.error(f"❌ Final recovery attempt also failed: {final_error}")
           logger.error(f"❌ Failed to save finding after all retries: {e}")
           raise e
-      except Exception as e:
-        logger.error(f"❌ Error saving finding (attempt {attempt + 1}): {e}")
+          
+      except OperationalError as e:
+        # Handle database locked/busy errors (common with SQLite concurrent access)
+        last_error = e
+        error_msg = str(e).lower()
+        if 'locked' in error_msg or 'busy' in error_msg:
+          logger.warning(f"⚠️ Database locked/busy on finding save (attempt {attempt + 1}/{max_retries}): {e}")
+        else:
+          logger.warning(f"⚠️ OperationalError on finding save (attempt {attempt + 1}/{max_retries}): {e}")
         self.db.rollback()
         if attempt < max_retries - 1:
-          time.sleep(0.1 * (attempt + 1))
+          delay = base_delay * (2 ** attempt) + 0.5  # Extra delay for database contention
+          logger.info(f"🔄 Retrying in {delay:.1f}s...")
+          time.sleep(delay)
+          continue
+        raise e
+        
+      except Exception as e:
+        last_error = e
+        logger.error(f"❌ Error saving finding (attempt {attempt + 1}/{max_retries}): {e}")
+        self.db.rollback()
+        if attempt < max_retries - 1:
+          delay = base_delay * (2 ** attempt)
+          logger.info(f"🔄 Retrying in {delay:.1f}s...")
+          time.sleep(delay)
           continue
         raise e
     
     # This shouldn't be reached, but just in case
-    logger.error("❌ Failed to save finding after all retries (loop exhausted)")
-    raise Exception("Failed to save finding after all retries")
+    logger.error(f"❌ Failed to save finding after all {max_retries} retries (loop exhausted)")
+    raise last_error or Exception("Failed to save finding after all retries")
 
   def get_findings(self, workshop_id: str, user_id: Optional[str] = None) -> List[DiscoveryFinding]:
     """Get discovery findings for a workshop, optionally filtered by user."""
@@ -984,13 +1130,16 @@ class DatabaseService:
       logger.info(f"📊 Final validated_ratings: {validated_ratings}")
     
     # Check if annotation already exists for this user and trace
-    # Use retry logic to handle concurrent write conflicts
-    from sqlalchemy.exc import IntegrityError
+    # Use retry logic to handle concurrent write conflicts transparently
+    # Retries are automatic and invisible to the frontend
+    from sqlalchemy.exc import IntegrityError, OperationalError
     import time
     
     max_retries = 3
+    base_delay = 0.2  # Base delay in seconds
     annotation_id = str(uuid.uuid4())
     
+    last_error = None
     for attempt in range(max_retries):
       try:
         existing_annotation = (
@@ -1042,7 +1191,7 @@ class DatabaseService:
           )
         else:
           # Create new annotation
-          logger.info(f"🆕 Creating new annotation (attempt {attempt + 1})")
+          logger.info(f"🆕 Creating new annotation (attempt {attempt + 1}/{max_retries})")
           db_annotation = AnnotationDB(
             id=annotation_id,
             workshop_id=workshop_id,
@@ -1073,51 +1222,78 @@ class DatabaseService:
             
       except IntegrityError as e:
         # Handle race condition - another request inserted the same record
-        logger.warning(f"⚠️ IntegrityError on annotation save (attempt {attempt + 1}): {e}")
+        last_error = e
+        logger.warning(f"⚠️ IntegrityError on annotation save (attempt {attempt + 1}/{max_retries}): {e}")
         self.db.rollback()
         if attempt < max_retries - 1:
-          time.sleep(0.1 * (attempt + 1))  # Exponential backoff
+          delay = base_delay * (2 ** attempt)  # Exponential backoff: 0.2, 0.4, 0.8s
+          logger.info(f"🔄 Retrying in {delay:.1f}s...")
+          time.sleep(delay)
           continue
         else:
           # On final attempt, try to fetch and update the existing record
           logger.info("🔄 Final attempt: fetching existing annotation to update")
-          existing = self.db.query(AnnotationDB).filter(
-            AnnotationDB.user_id == annotation_data.user_id,
-            AnnotationDB.trace_id == annotation_data.trace_id
-          ).first()
-          if existing:
-            if validated_rating is not None:
-              existing.rating = validated_rating
-            if validated_ratings is not None:
-              existing.ratings = validated_ratings
-            if annotation_data.comment is not None:
-              existing.comment = annotation_data.comment
-            self.db.commit()
-            self.db.refresh(existing)
-            logger.info(f"✅ Annotation updated after conflict: id={existing.id}")
-            self._sync_annotation_with_mlflow(workshop_id, existing)
-            return Annotation(
-              id=existing.id,
-              workshop_id=existing.workshop_id,
-              trace_id=existing.trace_id,
-              user_id=existing.user_id,
-              rating=existing.rating,
-              ratings=existing.ratings,
-              comment=existing.comment,
-              mlflow_trace_id=existing.trace.mlflow_trace_id if existing.trace else None,
-              created_at=existing.created_at,
-            )
+          try:
+            existing = self.db.query(AnnotationDB).filter(
+              AnnotationDB.user_id == annotation_data.user_id,
+              AnnotationDB.trace_id == annotation_data.trace_id
+            ).first()
+            if existing:
+              if validated_rating is not None:
+                existing.rating = validated_rating
+              if validated_ratings is not None:
+                existing.ratings = validated_ratings
+              if annotation_data.comment is not None:
+                existing.comment = annotation_data.comment
+              self.db.commit()
+              self.db.refresh(existing)
+              logger.info(f"✅ Annotation updated after conflict: id={existing.id}")
+              self._sync_annotation_with_mlflow(workshop_id, existing)
+              return Annotation(
+                id=existing.id,
+                workshop_id=existing.workshop_id,
+                trace_id=existing.trace_id,
+                user_id=existing.user_id,
+                rating=existing.rating,
+                ratings=existing.ratings,
+                comment=existing.comment,
+                mlflow_trace_id=existing.trace.mlflow_trace_id if existing.trace else None,
+                created_at=existing.created_at,
+              )
+          except Exception as final_error:
+            logger.error(f"❌ Final recovery attempt also failed: {final_error}")
           raise e
-      except Exception as e:
-        logger.error(f"❌ Error saving annotation (attempt {attempt + 1}): {e}")
+          
+      except OperationalError as e:
+        # Handle database locked/busy errors (common with SQLite concurrent access)
+        last_error = e
+        error_msg = str(e).lower()
+        if 'locked' in error_msg or 'busy' in error_msg:
+          logger.warning(f"⚠️ Database locked/busy on annotation save (attempt {attempt + 1}/{max_retries}): {e}")
+        else:
+          logger.warning(f"⚠️ OperationalError on annotation save (attempt {attempt + 1}/{max_retries}): {e}")
         self.db.rollback()
         if attempt < max_retries - 1:
-          time.sleep(0.1 * (attempt + 1))
+          delay = base_delay * (2 ** attempt) + 0.5  # Extra delay for database contention
+          logger.info(f"🔄 Retrying in {delay:.1f}s...")
+          time.sleep(delay)
+          continue
+        raise e
+        
+      except Exception as e:
+        last_error = e
+        logger.error(f"❌ Error saving annotation (attempt {attempt + 1}/{max_retries}): {e}")
+        self.db.rollback()
+        if attempt < max_retries - 1:
+          delay = base_delay * (2 ** attempt)
+          logger.info(f"🔄 Retrying in {delay:.1f}s...")
+          time.sleep(delay)
           continue
         raise e
     
     # This shouldn't be reached, but just in case
-    raise Exception("Failed to save annotation after all retries")
+    logger.error(f"❌ Failed to save annotation after all {max_retries} retries (loop exhausted)")
+    raise last_error or Exception("Failed to save annotation after all retries")
 
   def _validate_and_normalize_rating(self, rating: any, judge_type: str) -> Optional[int]:
     """Validate and normalize a rating based on judge type.
@@ -2364,11 +2540,32 @@ class DatabaseService:
     The phase stays as DISCOVERY but discovery_started is set to False,
     which causes the UI to show the Discovery Start Page.
     
+    IMPORTANT: This also clears all discovery-related data so participants start fresh:
+    - Discovery findings (participant responses)
+    - User trace orders (personalized trace lists)
+    - User discovery completions (who completed discovery)
+    
     Returns the updated workshop or None if not found.
     """
     workshop = self.db.query(WorkshopDB).filter(WorkshopDB.id == workshop_id).first()
     if not workshop:
       return None
+    
+    # Clear all discovery-related data so participants start fresh
+    # 1. Clear discovery findings (participant responses)
+    self.db.query(DiscoveryFindingDB).filter(
+      DiscoveryFindingDB.workshop_id == workshop_id
+    ).delete(synchronize_session=False)
+    
+    # 2. Clear user trace orders (personalized trace lists)
+    self.db.query(UserTraceOrderDB).filter(
+      UserTraceOrderDB.workshop_id == workshop_id
+    ).delete(synchronize_session=False)
+    
+    # 3. Clear user discovery completions (who completed discovery)
+    self.db.query(UserDiscoveryCompletionDB).filter(
+      UserDiscoveryCompletionDB.workshop_id == workshop_id
+    ).delete(synchronize_session=False)
     
     # Keep phase as DISCOVERY but mark discovery as NOT started
     # This causes the UI to show the Discovery Start Page
@@ -2381,6 +2578,60 @@ class DatabaseService:
     
     # Clear active discovery trace list so new selection can be made
     workshop.active_discovery_trace_ids = None
+    
+    self.db.commit()
+    self.db.refresh(workshop)
+    
+    return Workshop(
+      id=workshop.id,
+      name=workshop.name,
+      description=workshop.description,
+      facilitator_id=workshop.facilitator_id,
+      status=workshop.status,
+      current_phase=workshop.current_phase,
+      completed_phases=workshop.completed_phases or [],
+      discovery_started=workshop.discovery_started or False,
+      annotation_started=workshop.annotation_started or False,
+      active_discovery_trace_ids=workshop.active_discovery_trace_ids or [],
+      active_annotation_trace_ids=workshop.active_annotation_trace_ids or [],
+      created_at=workshop.created_at,
+    )
+
+  def reset_workshop_to_annotation(self, workshop_id: str) -> Optional[Workshop]:
+    """Reset a workshop back to the annotation start page (before annotation was started).
+    
+    This allows changing the annotation configuration (e.g., trace selection, randomization).
+    The phase stays as ANNOTATION but annotation_started is set to False,
+    which causes the UI to show the Annotation Start Page.
+    
+    IMPORTANT: This clears all annotation-related data so SMEs start fresh:
+    - All annotations submitted by SMEs
+    
+    Traces are kept, but SMEs will start fresh from the beginning.
+    
+    Returns the updated workshop or None if not found.
+    """
+    workshop = self.db.query(WorkshopDB).filter(WorkshopDB.id == workshop_id).first()
+    if not workshop:
+      return None
+    
+    # Clear all annotation-related data so SMEs start fresh
+    # Clear annotations submitted by SMEs
+    self.db.query(AnnotationDB).filter(
+      AnnotationDB.workshop_id == workshop_id
+    ).delete(synchronize_session=False)
+    
+    # Keep phase as ANNOTATION but mark annotation as NOT started
+    # This causes the UI to show the Annotation Start Page
+    workshop.current_phase = WorkshopPhase.ANNOTATION
+    workshop.annotation_started = False
+    
+    # Keep completed phases up to discovery (annotation not yet complete)
+    completed = workshop.completed_phases or []
+    workshop.completed_phases = [p for p in completed if p in ['intake', 'discovery']]
+    
+    # Clear active annotation trace list so new selection can be made
+    workshop.active_annotation_trace_ids = None
     
     self.db.commit()
     self.db.refresh(workshop)

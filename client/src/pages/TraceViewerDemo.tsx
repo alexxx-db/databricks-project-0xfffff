@@ -280,6 +280,9 @@ export function TraceViewerDemo() {
         const hasChanged = q1Trimmed !== savedState.q1 || q2Trimmed !== savedState.q2;
         if (!hasChanged) {
           console.log(`No changes detected for trace ${traceId}, skipping save`);
+          // Even though we skip the save, ensure the trace is marked as submitted
+          // This fixes the issue where "Complete" doesn't record the last trace
+          setSubmittedFindings(prev => new Set([...prev, traceId]));
           return true; // No change needed, return success
         }
       }

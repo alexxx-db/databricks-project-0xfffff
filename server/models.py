@@ -56,6 +56,7 @@ class UserCreate(BaseModel):
 class UserLogin(BaseModel):
   email: str
   password: str
+  workshop_id: Optional[str] = None  # Required for participants/SMEs to validate access
 
 
 class User(BaseModel):
@@ -154,6 +155,8 @@ class Workshop(BaseModel):
   annotation_started: bool = False
   active_discovery_trace_ids: List[str] = Field(default_factory=list)
   active_annotation_trace_ids: List[str] = Field(default_factory=list)
+  discovery_randomize_traces: bool = False  # Whether to randomize trace order in discovery
+  annotation_randomize_traces: bool = False  # Whether to randomize trace order in annotation
   judge_name: str = 'workshop_judge'  # Name used for MLflow feedback entries
   created_at: datetime = Field(default_factory=datetime.now)
 
