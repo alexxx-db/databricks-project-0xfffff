@@ -9,7 +9,9 @@ const FACILITATOR_PASSWORD =
   process.env.E2E_FACILITATOR_PASSWORD ?? 'facilitator123';
 const API_URL = process.env.E2E_API_URL ?? 'http://127.0.0.1:8000';
 
-test('rubric creation: facilitator can advance from discovery and create a rubric question', async ({
+test('rubric creation: facilitator can advance from discovery and create a rubric question', {
+  tag: ['@spec:RUBRIC_SPEC'],
+}, async ({
   page,
   request,
 }) => {
