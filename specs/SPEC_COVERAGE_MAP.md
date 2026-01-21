@@ -1,6 +1,6 @@
 # Spec Test Coverage Map
 
-**Generated**: 2026-01-20 12:07:35
+**Generated**: 2026-01-21 09:25:25
 
 This report shows which tests cover each specification.
 Tests are tagged using framework-specific conventions:
@@ -23,9 +23,10 @@ Tests are tagged using framework-specific conventions:
 | [DISCOVERY_TRACE_ASSIGNMENT_SPEC](#discovery-trace-assignment-spec) | 3 | 1 | 1 | 5 | ✅ Covered |
 | [JUDGE_EVALUATION_SPEC](#judge-evaluation-spec) | 28 | 0 | 1 | 29 | ✅ Covered |
 | [RUBRIC_SPEC](#rubric-spec) | 0 | 1 | 1 | 2 | 🟡 Partial |
+| [TRACE_DISPLAY_SPEC](#trace-display-spec) | 0 | 5 | 0 | 5 | ✅ Covered |
 | [UI_COMPONENTS_SPEC](#ui-components-spec) | 0 | 0 | 0 | 0 | ❌ Uncovered |
 
-**Coverage**: 8/9 specs (88%)
+**Coverage**: 9/10 specs (90%)
 
 ---
 
@@ -144,6 +145,16 @@ Tests are tagged using framework-specific conventions:
 ### Vitest (Unit)
 
 - `client/src/utils/rubricUtils.test.ts`
+
+## TRACE_DISPLAY_SPEC
+
+### Playwright (E2E)
+
+- `client/tests/e2e/jsonpath-trace-display.spec.ts`
+- `client/tests/e2e/jsonpath-trace-display.spec.ts`
+- `client/tests/e2e/jsonpath-trace-display.spec.ts`
+- `client/tests/e2e/jsonpath-trace-display.spec.ts`
+- `client/tests/e2e/jsonpath-trace-display.spec.ts`
 
 ## UI_COMPONENTS_SPEC
 
